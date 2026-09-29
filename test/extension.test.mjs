@@ -15,31 +15,38 @@ const { default: faikuTheme, THEME_NAME } = await import("../index.ts");
 function fakePi() {
 	const commands = new Map();
 	const events = new Map();
+	const transformers = [];
 	return {
 		commands,
 		events,
+		transformers,
 		registerCommand: (name, definition) => commands.set(name, definition),
 		registerTool: () => {},
 		registerShortcut: () => {},
+		registerMarkdownTransformer: (transformer) => transformers.push(transformer),
 		on: (event, handler) => events.set(event, handler),
 	};
 }
 
 function fakeContext(overrides = {}) {
 	const notifications = [];
+	/** Stands in for pi's TUI: the only thing that can put a frame on screen. */
+	const tui = { terminal: { rows: 40, columns: 100 }, requestRender: () => {}, invalidate: () => {} };
 	const ui = {
 		notifications,
+		tui,
 		editorFactory: undefined,
 		editorCleared: null,
 		themes: [{ name: THEME_NAME, path: join(agentDir, "themes", "faiku.json") }],
 		currentTheme: "dark",
 		overlays: [],
+		overlayComponents: [],
 		toolsExpanded: false,
 		thinkingToggles: 0,
 		selects: [],
 		setTheme: (name) => {
 			ui.currentTheme = name;
-			ui.theme = { name };
+			ui.theme = { name, fg: (role, text) => `<${role}>${text}</${role}>` };
 			return { success: true };
 		},
 		getAllThemes: () => ui.themes,
@@ -50,7 +57,7 @@ function fakeContext(overrides = {}) {
 			// handlers into the editor, so the fake does the same: the collapse
 			// feature reaches thinking visibility through those handlers.
 			if (factory) {
-				const component = factory({ terminal: { rows: 40, columns: 100 }, requestRender: () => {} }, { borderColor: (text) => text }, { matches: () => false });
+				const component = factory(ui.tui, { borderColor: (text) => text }, { matches: () => false });
 				component.actionHandlers.set("app.thinking.toggle", () => {
 					ui.thinkingToggles += 1;
 				});
@@ -69,10 +76,17 @@ function fakeContext(overrides = {}) {
 		notify: (message, level) => notifications.push({ message, level }),
 		custom: (factory, options) => {
 			ui.overlays.push({ factory, options });
+			// pi calls the factory itself, handing it the TUI it is about to draw
+			// into. The reveal only has a clock to run on because of that.
+			const component = factory(ui.tui, ui.theme, { matches: () => false }, () => {});
+			ui.overlayComponents.push(component);
 			options.onHandle?.({ hide: () => {}, setHidden: () => {} });
 			return new Promise(() => {});
 		},
-		theme: { name: "dark" },
+		theme: {
+			name: "dark",
+			fg: (role, text) => `<${role}>${text}</${role}>`,
+		},
 	};
 	return {
 		mode: "tui",
@@ -373,8 +387,18 @@ test("`/faiku theme on` takes the theme back even so", async () => {
 test("a configuration written before the session is honoured", async () => {
 	const { ctx } = await start({ faiku: { box: false, toasts: false, applyTheme: false, placeholder: "Ready" } });
 	assert.equal(ctx.ui.editorFactory, undefined);
-	assert.equal(ctx.ui.overlays.length, 0);
 	assert.equal(ctx.ui.currentTheme, "dark");
+	// With no box there is still one overlay, mounted only to hold the TUI the
+	// reveal needs. It must never draw a thing.
+	assert.equal(ctx.ui.overlays.length, 1);
+	const options = ctx.ui.overlays[0].options.overlayOptions();
+	assert.equal(options.visible(100), false);
+	assert.equal(options.nonCapturing, true);
+});
+
+test("with the reveal off nothing is mounted to hold the TUI", async () => {
+	const { ctx } = await start({ faiku: { box: false, toasts: false, fade: false } });
+	assert.equal(ctx.ui.overlays.length, 0);
 });
 
 test("the timer counts the agent's working time, not the session's", async () => {
@@ -419,4 +443,163 @@ test("shutting down releases the editor and the overlay", async () => {
 	// Nothing may throw, and a second shutdown must be harmless too.
 	pi.events.get("session_shutdown")({ type: "session_shutdown" });
 	assert.equal(ctx.ui.editorFactory === undefined || typeof ctx.ui.editorFactory === "function", true);
+});
+
+// --- the reveal -----------------------------------------------------------
+
+/** A chunk of assistant text as `message_update` carries it. */
+function streamed(text, thinking) {
+	return {
+		type: "message_update",
+		message: {
+			role: "assistant",
+			content: [
+				...(thinking ? [{ type: "thinking", thinking }] : []),
+				{ type: "text", text },
+			],
+		},
+		assistantMessageEvent: { type: "text_delta", delta: text },
+	};
+}
+
+/** Ask pi's markdown transformer for the streaming component, as pi would. */
+function render(pi, markdown, messageType = "assistant") {
+	return pi.transformers[0](markdown, { messageType, isStreaming: true, availableWidth: 80 });
+}
+
+test("text that arrives in one chunk is revealed a few characters at a time", async () => {
+	const { pi } = await start({ faiku: { fadeRate: 60 } });
+	pi.events.get("message_update")(streamed("a".repeat(300)));
+	assert.equal(render(pi, "a".repeat(300)).length < 300, true, "the chunk must not land whole");
+	await wait(80);
+	const later = render(pi, "a".repeat(300));
+	assert.ok(later.length > 1, "the reveal must move on its own");
+	await wait(300);
+	assert.ok(render(pi, "a".repeat(300)).length <= 300);
+});
+
+test("a chunk that has finished revealing is shown in full and untinted", async () => {
+	const { pi } = await start({ faiku: { fadeRate: 60 } });
+	pi.events.get("message_update")(streamed("b".repeat(60)));
+	await wait(2500);
+	const shown = render(pi, "b".repeat(60));
+	assert.equal(shown, "b".repeat(60));
+	assert.equal(shown.includes("<"), false, "settled text must not keep its ramp");
+});
+
+test("a message that ends mid-reveal shows all of it at once", async () => {
+	const { pi } = await start({ faiku: { fadeRate: 60 } });
+	pi.events.get("message_update")(streamed("c".repeat(400)));
+	assert.ok(render(pi, "c".repeat(400)).length < 400);
+	pi.events.get("message_end")({ type: "message_end", message: streamed("c".repeat(400)).message });
+	// pi stops asking for the streaming transform, so the settled component
+	// must not depend on a reveal that is no longer running.
+	assert.equal(render(pi, "c".repeat(400)).length <= 400, true);
+});
+
+test("the newest characters are dimmed and the settled ones are not", async () => {
+	const { pi } = await start({ faiku: { fadeRate: 60 } });
+	// Trimmed like pi trims it, or the extension would not recognise the text
+	// it is being handed back.
+	const text = "and then we know it ".repeat(20).trim();
+	pi.events.get("message_update")(streamed(text));
+	await wait(700);
+	const shown = render(pi, text);
+	assert.ok(shown.includes("<dim>"), `expected a dimmed tail, got ${JSON.stringify(shown)}`);
+	// The character released first has settled and must be plain again, which
+	// is the whole point of the ramp rather than a permanent tint.
+	assert.ok(shown.startsWith("and"), `expected a plain head, got ${JSON.stringify(shown)}`);
+	assert.ok(shown.length < text.length, "the reveal should still be running");
+	assert.ok(shown.startsWith("and then we know it"), `expected a plain head, got ${JSON.stringify(shown)}`);
+	// The ramp is a ramp: the newest characters are dim, the ones just behind
+	// them halfway, and the head has settled back to plain.
+	assert.ok(shown.includes("<muted>"), `expected a halfway band, got ${JSON.stringify(shown)}`);
+	assert.ok(/<dim>[^<]*<\/dim>$/.test(shown), `expected the newest characters to be dim, got ${JSON.stringify(shown)}`);
+});
+
+test("only the live streaming message is touched", async () => {
+	const { pi } = await start({ faiku: { fadeRate: 60 } });
+	pi.events.get("message_update")(streamed("d".repeat(300)));
+	const settled = pi.transformers[0]("d".repeat(300), { messageType: "assistant", isStreaming: false, availableWidth: 80 });
+	assert.equal(settled, "d".repeat(300));
+	// Text pi never measured, and text that is not a stream at all.
+	const unknown = pi.transformers[0]("never seen this", { messageType: "assistant", isStreaming: true, availableWidth: 80 });
+	assert.equal(unknown, "never seen this");
+	const user = pi.transformers[0]("d".repeat(300), { messageType: "user", isStreaming: true, availableWidth: 80 });
+	assert.equal(user, "d".repeat(300));
+});
+
+test("thinking is revealed on its own stream, apart from the answer", async () => {
+	const { pi } = await start({ faiku: { fadeRate: 60 } });
+	pi.events.get("message_update")(streamed("e".repeat(10), "f".repeat(400)));
+	// Eight characters is a token's worth and lands whole; four hundred does not.
+	assert.ok(render(pi, "f".repeat(400), "assistant-thinking").length < 400);
+	assert.equal(render(pi, "e".repeat(10)).length, 10);
+});
+
+test("with the reveal off the text is never held back", async () => {
+	const { pi } = await start({ faiku: { fade: false } });
+	pi.events.get("message_update")(streamed("g".repeat(400)));
+	assert.equal(render(pi, "g".repeat(400)), "g".repeat(400));
+	await wait(80);
+	assert.equal(render(pi, "g".repeat(400)), "g".repeat(400));
+});
+
+test("the reveal's window and rate are settable, and nonsense is refused", async () => {
+	const { pi, ctx } = await start();
+	await pi.commands.get("faiku").handler("fade window 400", ctx);
+	assert.equal((await readConfig()).faiku.fadeMs, 400);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("400"));
+	await pi.commands.get("faiku").handler("fade rate 1200", ctx);
+	assert.equal((await readConfig()).faiku.fadeRate, 1200);
+
+	await pi.commands.get("faiku").handler("fade window 9000", ctx);
+	assert.equal((await readConfig()).faiku.fadeMs, 400, "a window out of range must not be saved");
+	assert.equal(ctx.ui.notifications.at(-1).level, "warning");
+	await pi.commands.get("faiku").handler("fade rate abc", ctx);
+	assert.equal((await readConfig()).faiku.fadeRate, 1200, "a rate that is not a number must not be saved");
+	await pi.commands.get("faiku").handler("fade sideways", ctx);
+	assert.equal(ctx.ui.notifications.at(-1).level, "warning");
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("/faiku fade"));
+});
+
+test("the reveal is switched like every other feature", async () => {
+	const { pi, ctx } = await start();
+	await pi.commands.get("faiku").handler("fade off", ctx);
+	assert.equal((await readConfig()).faiku.fade, false);
+	pi.events.get("message_update")(streamed("h".repeat(400)));
+	assert.equal(render(pi, "h".repeat(400)), "h".repeat(400));
+	await pi.commands.get("faiku").handler("fade on", ctx);
+	assert.equal((await readConfig()).faiku.fade, true);
+});
+
+test("a user's own message never moves the assistant's reveal", async () => {
+	const { pi } = await start({ faiku: { fadeRate: 5000 } });
+	pi.events.get("message_update")(streamed("i".repeat(400)));
+	await wait(900);
+	const plain = (shown) => shown.replace(/<[^>]*>/g, "");
+	assert.equal(plain(render(pi, "i".repeat(400))).length, 400, "the reveal should have finished");
+
+	// Counting a user message would extend the assistant's character stream and
+	// start a second reveal on text that is already all on screen.
+	pi.events.get("message_update")({
+		type: "message_update",
+		message: { role: "user", content: [{ type: "text", text: "j".repeat(400) }] },
+		assistantMessageEvent: { type: "text_delta", delta: "j".repeat(400) },
+	});
+	await wait(100);
+	assert.equal(plain(render(pi, "i".repeat(400))).length, 400, "a user message must not restart the reveal");
+});
+
+test("outside the TUI there are no frames, so the text is never held back", async () => {
+	const { pi, ctx } = await start({ faiku: { fadeRate: 60 } });
+	await pi.commands.get("faiku").handler("info", ctx);
+	assert.equal(ctx.ui.notifications.length > 0, true);
+	// Print mode has no frames to advance a reveal with, so the message must be
+	// allowed to arrive whole rather than wait for a clock that never ticks.
+	pi.events.get("session_shutdown")({ type: "session_shutdown" });
+	const printed = fakeContext({ mode: "print" });
+	await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, printed);
+	pi.events.get("message_update")(streamed("k".repeat(400)));
+	assert.equal(render(pi, "k".repeat(400)), "k".repeat(400));
 });

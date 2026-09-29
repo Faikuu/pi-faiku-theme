@@ -1,8 +1,9 @@
 # pi-faiku-theme
 
 A pi package that makes pi look like [opencode](https://opencode.ai): opencode's default
-dark palette, an ASCII input box with everything pi knows about the session on it, and a
-notification in the top-right corner whenever you copy or paste text.
+dark palette, an ASCII input box with everything pi knows about the session on it, a
+notification in the top-right corner whenever you copy or paste text, and a reveal that
+smooths over output which arrives in one chunk.
 
 ```
   🧠 claude-sonnet-4-5  🔀 anthropic  🔁 thinking medium  🧮 12% · 18.4k  🔢 ↑4.2k ↓980  💲 $0.42
@@ -108,6 +109,9 @@ errors.
 /faiku git on|off      changed and untracked file counts
 /faiku elapsed on|off  how long the agent has been working
 /faiku history on|off  the prompt history panel above the box
+/faiku fade on|off     reveal text that arrives in one chunk
+/faiku fade window <ms> how long a backlog of characters takes to clear
+/faiku fade rate <n>   reveal ceiling in characters a second
 /faiku collapse <mode> all | thinking | tools | off
 /faiku blocks          pick a collapsed block to expand
 /faiku padding <mode>  comfortable | compact
@@ -142,6 +146,36 @@ tool output, and `/faiku info` says what it could not do. And because the toggle
 pi persists the value it left behind, so a collapsed transcript stays collapsed in pi without
 this package until `/faiku collapse off`, `/faiku off` or `ctrl+t` puts it back.
 
+## The reveal
+
+pi already draws an assistant message as it streams. A provider that delivers its output in
+chunks hands it several hundred characters in one update, and those land in a single frame.
+This package holds them back and lets them out at a steady rate, with the newest ones tinted
+so they brighten as they settle:
+
+```
+t=0ms    and then we
+t=60ms   and then we kn▒ow i
+t=200ms  and then we know it
+                    ^ the newest characters are dim, then halfway, then settled
+```
+
+It stays out of the way in three ways. An arrival of a dozen characters or fewer is released
+whole, because token-by-token streaming is already smooth and delaying it would only add lag.
+The reveal runs only while something is pending or still brightening, never while pi is idle.
+And colour is applied only to a plain run of prose: half-typed markdown and the inside of a
+code fence are left exactly as they are, so the parser and the syntax highlighter never see
+an escape sequence.
+
+Two numbers are worth turning. `fade window` (default 260 ms) is how long the characters
+waiting to be shown should take to arrive — it is the speed of the reveal. `fade rate`
+(default 900 characters a second) is the ceiling, which only a very large chunk ever reaches;
+raise it to make a big dump of text finish sooner, lower it to make everything unhurried.
+
+What this cannot reach: tool output. pi renders bash results, file reads and diffs in its own
+component, with no extension hook in front of it, so those still arrive whole. Assistant text
+and thinking runs both stream through the markdown transformer this uses.
+
 ## Settings
 
 Everything the commands do is written to `~/.pi/agent/settings.json` under `faiku`, so it
@@ -159,6 +193,9 @@ survives a restart:
     "gitStatus": true,
     "elapsed": true,
     "history": true,
+    "fade": true,
+    "fadeMs": 260,
+    "fadeRate": 900,
     "collapse": "all",
     "padding": "comfortable",
     "placeholder": "Ask anything…",
@@ -200,6 +237,13 @@ inside. Escape still closes the list and leaves the path in the input, and a fil
 it as before. Only `@` is treated this way: a slash command's arguments and an ordinary path
 keep pi's rule, where accepting a directory is a step on the way to a file.
 
+The reveal works because pi asks a markdown transformer what to render every time it draws,
+not once when the message arrives. The transformer answers with a shorter string while the
+backlog is still draining, the extension releases a few more characters on a 33ms clock and
+invalidates the components that cached their lines, and what comes back the next frame is a
+little further along. Nothing about pi's rendering is replaced: the same markdown parser draws
+the same message, one frame at a time.
+
 Layout is measured in terminal columns, never in string length, and every row is built for
 the width it was handed — which is what makes the frame hold together next to emoji and CJK
 text, at any terminal width down to 24 columns. Below that, pi's own editor is left alone
@@ -217,6 +261,7 @@ rather than drawn as a box too small to be a box.
 | `lib/editor.ts` | the framed editor, the history panel, the clipboard events, the `@` picker |
 | `lib/history.ts` | the prompt history and the panel drawn above the box |
 | `lib/toast.ts` | the toast store and its renderer |
+| `lib/fade.ts` | the reveal: how much streamed text is shown, and how fast |
 | `lib/config.ts`, `lib/settings.ts` | configuration and `settings.json` |
 | `lib/collapse.ts` | which blocks start folded, and the picker that unfolds them |
 

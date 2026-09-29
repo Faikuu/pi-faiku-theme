@@ -79,9 +79,22 @@ test("describeConfig reports every switch as on or off", () => {
 	assert.ok(described.includes("toasts     off"));
 	assert.ok(described.includes("box        on"));
 	assert.ok(described.includes("history    on, 6 rows"));
+	assert.ok(described.includes("fade       on, 260 ms, 900 chars/s"));
 	assert.ok(described.includes("collapse   all"));
 	assert.ok(described.includes("padding    compact"));
-	assert.equal(described.split("\n").length, 12);
+	assert.equal(described.split("\n").length, 13);
+});
+
+test("the reveal is on by default and is read, clamped and refused like the rest", () => {
+	assert.equal(parseConfig({}).fade, true);
+	assert.equal(parseConfig({ faiku: { fade: false } }).fade, false);
+	assert.equal(parseConfig({ faiku: { fade: "yes" } }).fade, true);
+	assert.equal(parseConfig({ faiku: { fadeMs: 400 } }).fadeMs, 400);
+	assert.equal(parseConfig({ faiku: { fadeMs: 10 } }).fadeMs, 80);
+	assert.equal(parseConfig({ faiku: { fadeMs: 99999 } }).fadeMs, 1500);
+	assert.equal(parseConfig({ faiku: { fadeRate: 1500 } }).fadeRate, 1500);
+	assert.equal(parseConfig({ faiku: { fadeRate: 0 } }).fadeRate, 60);
+	assert.equal(parseConfig({ faiku: { fadeRate: Number.NaN } }).fadeRate, DEFAULT_CONFIG.fadeRate);
 });
 
 test("the collapse mode is read, and only the four modes are", () => {

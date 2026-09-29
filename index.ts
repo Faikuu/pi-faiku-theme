@@ -7,7 +7,8 @@
  *    theme roles, so the whole interface is amber-on-charcoal instead of pi's
  *    blue.
  * 2. This extension — an opencode-style ASCII input box drawn around pi's own
- *    editor, and a top-right notification whenever text is copied or pasted.
+ *    editor, a top-right notification whenever text is copied or pasted, and a
+ *    reveal that smooths over output which arrives in one chunk.
  *
  * The box is a reframe, not a reimplementation: `FaikuEditor` asks pi's editor
  * for its layout and wraps the result, so word wrap, scrolling, the IME cursor
@@ -24,6 +25,9 @@ import type {
 	ExtensionContext,
 	ExtensionEvent,
 	KeybindingsManager,
+	MarkdownTransformContext,
+	MessageEndEvent,
+	MessageUpdateEvent,
 	ModelSelectEvent,
 	SessionStartEvent,
 	ToolResultEvent,
@@ -33,6 +37,7 @@ import { blockChoices, COLLAPSE_MODES, describeDeferredCollapse, describeEffect,
 import { configPatch, describeConfig, type FaikuConfig, parseConfig } from "./lib/config.ts";
 import { createWorkClock } from "./lib/clock.ts";
 import { FaikuEditor, previewFrame } from "./lib/editor.ts";
+import { createFadeState, FRAME_MS, MAX_FADE_MS, MAX_FADE_RATE, MIN_FADE_MS, MIN_FADE_RATE, renderStreaming, segmentTexts, type FadeChannel, type FadeState, type TintLevel } from "./lib/fade.ts";
 import { formatDuration } from "./lib/format.ts";
 import { createDirtyProbe, readGitBranch, type DirtyProbe } from "./lib/git.ts";
 import { collectInfo, emptyInfo, type FaikuInfo } from "./lib/info.ts";
@@ -54,6 +59,7 @@ const TOGGLES = {
 	git: "gitStatus",
 	elapsed: "elapsed",
 	history: "history",
+	fade: "fade",
 } as const satisfies Record<string, keyof FaikuConfig>;
 
 export default async function faikuTheme(pi: ExtensionAPI) {
@@ -70,6 +76,10 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	let toasts: ToastStore = createToastStore({ ttlMs: config.toastTtlMs });
 	let overlay: OverlayHandle | undefined;
 	let closing: (() => void) | undefined;
+	/** The reveal: how much of the streaming text is on screen, and how fast. */
+	let fade: FadeState = createFadeState({ windowMs: config.fadeMs, rate: config.fadeRate });
+	/** The frame clock for that reveal, running only while it has work. */
+	let fadeTicker: ReturnType<typeof setInterval> | undefined;
 	/** The theme that was active before Faiku applied its own. */
 	let previousTheme: string | undefined;
 	/**
@@ -99,6 +109,70 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	function requestRender(force = false): void {
 		editor?.invalidate();
 		tui?.requestRender(force);
+	}
+
+	/**
+	 * Colour a run of freshly revealed characters, dimmest first.
+	 *
+	 * The theme is read per call rather than captured: `/faiku theme` can swap
+	 * it mid-reveal, and the ramp is short enough that the difference matters.
+	 */
+	function fadeTint(level: TintLevel, text: string): string {
+		const theme = ctx?.ui.theme;
+		if (!theme || level === 2) return text;
+		return theme.fg(level === 0 ? "dim" : "muted", text);
+	}
+
+	/**
+	 * Hand pi's markdown a shorter string than the model has produced.
+	 *
+	 * pi calls the transformer on every render, not once per message, which is
+	 * the whole mechanism: what comes back is decided again each frame, so
+	 * releasing a few more characters and repainting *is* the animation.
+	 * Everything except the live streaming message is left byte for byte alone.
+	 */
+	function fadeMarkdownIn(markdown: string, context: MarkdownTransformContext): string {
+		// Without a TUI there are no frames to advance the reveal, and a message
+		// that is never finished would stay half shown: print and RPC modes
+		// therefore get their text whole.
+		if (!config.enabled || !config.fade || !tui || !context.isStreaming) return markdown;
+		const channel = context.messageType as FadeChannel;
+		if (channel !== "assistant" && channel !== "assistant-thinking") return markdown;
+		return renderStreaming(fade, channel, markdown, Date.now(), fadeTint);
+	}
+
+	/** Record what has arrived, and start the clock if any of it needs a reveal. */
+	function noteStream(message: unknown): void {
+		if (!config.enabled || !config.fade) return;
+		// Only the assistant has a stream to smooth. A user or tool message
+		// carries text blocks too, and counting those would put the reveal's
+		// idea of "how much has arrived" well ahead of what is on screen.
+		if ((message as { role?: string } | undefined)?.role !== "assistant") return;
+		const now = Date.now();
+		fade.note("assistant", segmentTexts(message, "assistant"), now);
+		fade.note("assistant-thinking", segmentTexts(message, "assistant-thinking"), now);
+		if (fade.animating) startFadeLoop();
+	}
+
+	function startFadeLoop(): void {
+		if (fadeTicker || !tui) return;
+		fadeTicker = setInterval(() => {
+			if (!config.enabled || !config.fade || !fade.advance(Date.now())) {
+				stopFadeLoop();
+				return;
+			}
+			// Components cache their rendered lines, so they have to be
+			// invalidated before the shorter string can reach the screen.
+			tui?.invalidate();
+			tui?.requestRender();
+		}, FRAME_MS);
+		if (typeof fadeTicker.unref === "function") fadeTicker.unref();
+	}
+
+	function stopFadeLoop(): void {
+		if (!fadeTicker) return;
+		clearInterval(fadeTicker);
+		fadeTicker = undefined;
 	}
 
 	/**
@@ -136,9 +210,15 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	 *
 	 * `custom()` resolves only when the overlay closes, so it is never awaited
 	 * here — the handle from `onHandle` is what the rest of the extension uses.
+	 *
+	 * With toasts off the overlay is still mounted when the reveal needs it:
+	 * this factory is the one place the extension gets hold of the TUI, which
+	 * the reveal needs in order to ask for frames. It is then permanently
+	 * invisible, and `notify` keeps quiet on its own.
 	 */
 	function mountOverlay(context: ExtensionContext): void {
-		if (overlay || !config.enabled || !config.toasts || context.mode !== "tui") return;
+		if (overlay || !config.enabled || context.mode !== "tui") return;
+		if (!config.toasts && !config.fade) return;
 		const component: Component & { dispose?(): void } = {
 			render: (width: number) => renderToasts(toasts.items(), width),
 			invalidate: () => undefined,
@@ -153,15 +233,25 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 				return component;
 			}, {
 				overlay: true,
-				overlayOptions: () => ({
-					anchor: "top-right",
-					width: config.toastWidth,
-					minWidth: 18,
-					margin: { top: 1, right: 1, bottom: 0, left: 0 },
-					// A notification must never take a keystroke.
-					nonCapturing: true,
-					visible: (termWidth: number) => termWidth >= 40,
-				}),
+				overlayOptions: () =>
+					config.toasts
+						? {
+							anchor: "top-right" as const,
+							width: config.toastWidth,
+							minWidth: 18,
+							margin: { top: 1, right: 1, bottom: 0, left: 0 },
+							// A notification must never take a keystroke.
+							nonCapturing: true,
+							visible: (termWidth: number) => termWidth >= 40,
+						}
+						: {
+							anchor: "top-right" as const,
+							width: 1,
+							minWidth: 1,
+							margin: { top: 0, right: 0, bottom: 0, left: 0 },
+							nonCapturing: true,
+							visible: () => false,
+						},
 				onHandle: (handle) => {
 					overlay = handle;
 				},
@@ -346,6 +436,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		startGit(context);
 		toasts = createToastStore({ ttlMs: config.toastTtlMs });
 		refresh();
+		fade = createFadeState({ windowMs: config.fadeMs, rate: config.fadeRate });
 		// The editor is mounted first so there is a TUI to repaint through: the
 		// startup screen is already drawn when a session starts, and switching
 		// the theme underneath it changes no text for a differential repaint to
@@ -382,6 +473,10 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		branch = config.gitStatus ? await readGitBranch(context.cwd) : null;
 		startGit(context);
 		refresh();
+		// Before the reveal is asked for anything else: new pacing means a new
+		// state, and whatever was half-revealed is better off shown in full.
+		stopFadeLoop();
+		fade = createFadeState({ windowMs: config.fadeMs, rate: config.fadeRate });
 		if (config.applyTheme) applyTheme(context);
 		else restoreTheme(context);
 		// Before the editor goes away: the thinking toggle is only reachable
@@ -441,13 +536,23 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		commandCtx.ui.notify(describeEffect(choice.effect), "info");
 	}
 
+	pi.registerMarkdownTransformer(fadeMarkdownIn);
+
 	pi.registerCommand("faiku", {
 		description: "Toggle the Faiku input box, theme and clipboard notifications",
 		handler: async (args: string, commandCtx: ExtensionCommandContext) => {
 			const [verb = "info", ...rest] = args.trim().split(/\s+/);
-			const command = verb.toLowerCase();
-			const argument = rest.join(" ").trim();
-			// `/faiku box off` switches the box; `/faiku off` switches everything.
+			let command = verb.toLowerCase();
+			let argument = rest.join(" ").trim();
+			// `/faiku fade window 300` and `/faiku fade rate 1200` are the
+			// toggle's own subcommands, so the verb is the subcommand and the
+			// rest is its argument.
+			const fadeSub = command === "fade" && argument !== "" && argument !== "on" && argument !== "off";
+			if (fadeSub) {
+				const [sub, ...more] = argument.split(/\s+/);
+				command = sub.toLowerCase();
+				argument = more.join(" ").trim();
+			}
 			const target = argument === "on" ? true : argument === "off" ? false : undefined;
 
 			if (command in TOGGLES) {
@@ -480,6 +585,28 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 					if (!(await persist({ padding: argument }))) return;
 					requestRender();
 					commandCtx.ui.notify(`Faiku padding ${argument}.`, "info");
+					return;
+				}
+				case "window": {
+					const ms = Number(argument);
+					if (!Number.isFinite(ms) || ms < MIN_FADE_MS || ms > MAX_FADE_MS) {
+						commandCtx.ui.notify(`Usage: /faiku fade window ${MIN_FADE_MS}-${MAX_FADE_MS} (ms)`, "warning");
+						return;
+					}
+					if (!(await persist({ fadeMs: Math.floor(ms) }))) return;
+					await reapply(commandCtx);
+					commandCtx.ui.notify(`Fade window ${Math.floor(ms)} ms.`, "info");
+					return;
+				}
+				case "rate": {
+					const chars = Number(argument);
+					if (!Number.isFinite(chars) || chars < MIN_FADE_RATE || chars > MAX_FADE_RATE) {
+						commandCtx.ui.notify(`Usage: /faiku fade rate ${MIN_FADE_RATE}-${MAX_FADE_RATE} (chars/s)`, "warning");
+						return;
+					}
+					if (!(await persist({ fadeRate: Math.floor(chars) }))) return;
+					await reapply(commandCtx);
+					commandCtx.ui.notify(`Fade rate ${Math.floor(chars)} chars/s.`, "info");
 					return;
 				}
 				case "collapse": {
@@ -527,6 +654,9 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 							"/faiku git on|off       changed and untracked file counts",
 							"/faiku elapsed on|off   the agent's working time",
 							"/faiku history on|off   the prompt history panel above the box",
+							"/faiku fade on|off      reveal text that arrives in one chunk",
+							"/faiku fade window <ms> how long a backlog of characters takes to clear",
+							"/faiku fade rate <n>    reveal ceiling in characters a second",
 							"/faiku collapse <mode>  all | thinking | tools | off",
 							"/faiku blocks           pick a collapsed block to expand",
 							"/faiku padding <mode>   comfortable | compact",
@@ -539,6 +669,12 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 				}
 				case "info":
 				default: {
+					// A subcommand of a toggle the switch above does not know is a
+					// typo, not a request for the configuration.
+					if (fadeSub) {
+						commandCtx.ui.notify("Usage: /faiku fade on|off | window <ms> | rate <chars/s>", "warning");
+						return;
+					}
 					refresh();
 					commandCtx.ui.notify(
 						[
@@ -595,8 +731,22 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		requestRender();
 	});
 
+	pi.on("message_update", (event: MessageUpdateEvent) => {
+		noteStream(event.message);
+	});
+
+	pi.on("message_end", (_event: MessageEndEvent) => {
+		// pi stops asking for the streaming transform when the message ends,
+		// so a reveal still in flight has to land now rather than leave text
+		// half-shown until the next chunk arrives.
+		fade.finish();
+		stopFadeLoop();
+	});
+
 	pi.on("session_shutdown", (_event: ExtensionEvent) => {
 		stopTicker();
+		stopFadeLoop();
+		fade.reset();
 		probe?.dispose();
 		probe = undefined;
 		editor?.dispose();
