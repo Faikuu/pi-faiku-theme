@@ -34,6 +34,9 @@ function fakeContext(overrides = {}) {
 		themes: [{ name: THEME_NAME, path: join(agentDir, "themes", "faiku.json") }],
 		currentTheme: "dark",
 		overlays: [],
+		toolsExpanded: false,
+		thinkingToggles: 0,
+		selects: [],
 		setTheme: (name) => {
 			ui.currentTheme = name;
 			ui.theme = { name };
@@ -43,8 +46,26 @@ function fakeContext(overrides = {}) {
 		setEditorComponent: (factory) => {
 			ui.editorFactory = factory;
 			if (factory === undefined) ui.editorCleared = true;
+			// pi calls the factory itself and only then copies its own action
+			// handlers into the editor, so the fake does the same: the collapse
+			// feature reaches thinking visibility through those handlers.
+			if (factory) {
+				const component = factory({ terminal: { rows: 40, columns: 100 }, requestRender: () => {} }, { borderColor: (text) => text }, { matches: () => false });
+				component.actionHandlers.set("app.thinking.toggle", () => {
+					ui.thinkingToggles += 1;
+				});
+				ui.editor = component;
+			}
 		},
 		getEditorComponent: () => ui.editorFactory,
+		getToolsExpanded: () => ui.toolsExpanded,
+		setToolsExpanded: (expanded) => {
+			ui.toolsExpanded = expanded;
+		},
+		select: async (title, options) => {
+			ui.selects.push({ title, options });
+			return options[ui.pick ?? 0];
+		},
 		notify: (message, level) => notifications.push({ message, level }),
 		custom: (factory, options) => {
 			ui.overlays.push({ factory, options });
@@ -55,13 +76,14 @@ function fakeContext(overrides = {}) {
 	};
 	return {
 		mode: "tui",
+		hasUI: true,
 		cwd: agentDir,
 		ui,
 		model: { id: "anthropic/claude-sonnet-4-5", provider: "anthropic" },
 		thinkingLevel: "medium",
 		isIdle: () => true,
 		getContextUsage: () => ({ tokens: 1000, contextWindow: 200_000, percent: 1 }),
-		sessionManager: { getBranch: () => [] },
+		sessionManager: { getBranch: () => [], getEntries: () => ui.entries ?? [] },
 		...overrides,
 	};
 }
@@ -170,6 +192,147 @@ test("padding and the placeholder are configurable, and a bad value is refused",
 	await command.handler("padding roomy", ctx);
 	assert.ok(ctx.ui.notifications.at(-1).message.includes("Usage:"));
 	assert.equal((await readConfig()).faiku.padding, "compact");
+});
+
+test("thinking blocks start collapsed, and pi's own toggle is what hides them", async () => {
+	const { pi, ctx } = await start();
+	// One flip, through the handler pi gave the editor: nothing reimplemented.
+	assert.equal(ctx.ui.thinkingToggles, 1);
+	await pi.commands.get("faiku").handler("info", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("collapse   all"));
+});
+
+test("thinking blocks already hidden by pi are not toggled again", async () => {
+	const { ctx } = await start({ hideThinkingBlock: true });
+	assert.equal(ctx.ui.thinkingToggles, 0);
+});
+
+test("expanded tool output is collapsed again on session start", async () => {
+	const { pi, ctx } = await start();
+	ctx.ui.toolsExpanded = true;
+	await pi.commands.get("faiku").handler("collapse all", ctx);
+	assert.equal(ctx.ui.toolsExpanded, false);
+});
+
+test("the master switch hands pi's own thinking state back", async () => {
+	const { pi, ctx } = await start();
+	// Folded on the way in, unfolded on the way out, both through pi's toggle.
+	assert.equal(ctx.ui.thinkingToggles, 1);
+	await pi.commands.get("faiku").handler("off", ctx);
+	assert.equal(ctx.ui.editorCleared, true);
+	assert.equal(ctx.ui.thinkingToggles, 2);
+	// And a session that starts with the package off folds nothing at all.
+	const again = await start({ faiku: { enabled: false } });
+	assert.equal(again.ctx.ui.thinkingToggles, 0);
+});
+
+test("a remounted box keeps following the thinking toggle", async () => {
+	const { pi, ctx } = await start();
+	// The editor goes away and comes back, with a new map of action handlers.
+	await pi.commands.get("faiku").handler("box off", ctx);
+	assert.equal(ctx.ui.editorCleared, true);
+	ctx.ui.thinkingToggles = 0;
+	await pi.commands.get("faiku").handler("box on", ctx);
+	// Put back the state the session start changed, then collapse it again: both
+	// flips have to be seen by the new editor, or the second one is a no-op.
+	await pi.commands.get("faiku").handler("collapse off", ctx);
+	await pi.commands.get("faiku").handler("collapse all", ctx);
+	assert.equal(ctx.ui.thinkingToggles, 2);
+});
+
+test("the collapse mode decides which groups start collapsed", async () => {
+	const { pi, ctx } = await start({ faiku: { collapse: "tools" } });
+	// Thinking is not this configuration's business, so it is left alone.
+	assert.equal(ctx.ui.thinkingToggles, 0);
+	await pi.commands.get("faiku").handler("collapse thinking", ctx);
+	assert.equal((await readConfig()).faiku.collapse, "thinking");
+	assert.equal(ctx.ui.thinkingToggles, 1);
+	// Turning the mode off puts back the thinking state faiku itself changed.
+	await pi.commands.get("faiku").handler("collapse off", ctx);
+	assert.equal((await readConfig()).faiku.collapse, "off");
+	assert.equal(ctx.ui.thinkingToggles, 2);
+});
+
+test("a collapse mode that is not one of the four is refused, and changes nothing", async () => {
+	const { pi, ctx } = await start();
+	await pi.commands.get("faiku").handler("collapse everything", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("Usage:"));
+	assert.equal((await readConfig()).faiku?.collapse, undefined);
+	assert.equal(ctx.ui.thinkingToggles, 1);
+});
+
+test("thinking cannot be collapsed without the box, and the report says so", async () => {
+	const { pi, ctx } = await start({ faiku: { box: false } });
+	assert.equal(ctx.ui.editorFactory, undefined);
+	assert.equal(ctx.ui.thinkingToggles, 0);
+	await pi.commands.get("faiku").handler("info", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("needs the faiku box on"));
+	// Tool output still gets the treatment it asked for.
+	ctx.ui.toolsExpanded = true;
+	await pi.commands.get("faiku").handler("collapse tools", ctx);
+	assert.equal(ctx.ui.toolsExpanded, false);
+});
+
+test("`/faiku blocks` lists the collapsed groups and expands the one picked", async () => {
+	const { pi, ctx } = await start();
+	ctx.ui.entries = [
+		{
+			type: "message",
+			message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }, { type: "toolCall", id: "1", name: "bash", arguments: {} }] },
+		},
+	];
+	ctx.ui.pick = 0;
+	await pi.commands.get("faiku").handler("blocks", ctx);
+	assert.deepEqual(ctx.ui.selects.at(-1).options, [
+		"thinking       1 block · collapsed",
+		"tool output   1 call · collapsed",
+		"everything    expand",
+		"collapse all again",
+	]);
+	// The first row expands thinking and nothing else.
+	assert.equal(ctx.ui.thinkingToggles, 2);
+	assert.equal(ctx.ui.toolsExpanded, false);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("Thinking blocks expanded"));
+});
+
+test("`/faiku blocks` expands tool output on the second row", async () => {
+	const { pi, ctx } = await start();
+	ctx.ui.entries = [
+		{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "1", name: "bash", arguments: {} }] } },
+	];
+	ctx.ui.pick = 0;
+	await pi.commands.get("faiku").handler("blocks", ctx);
+	assert.deepEqual(ctx.ui.selects.at(-1).options, ["tool output   1 call · collapsed", "collapse all again"]);
+	assert.equal(ctx.ui.toolsExpanded, true);
+	assert.equal(ctx.ui.thinkingToggles, 1);
+});
+
+test("`/faiku blocks` collapses everything again from its last row", async () => {
+	const { pi, ctx } = await start();
+	ctx.ui.entries = [
+		{ type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] } },
+	];
+	ctx.ui.pick = 0;
+	await pi.commands.get("faiku").handler("blocks", ctx);
+	ctx.ui.pick = 0;
+	await pi.commands.get("faiku").handler("blocks", ctx);
+	// Nothing was collapsed by the first pick, so the only row left collapses.
+	assert.deepEqual(ctx.ui.selects.at(-1).options, ["collapse all again"]);
+	// Session start collapsed them, the first pick expanded them, and this row
+	// puts them back: three flips of pi's own toggle in all.
+	assert.equal(ctx.ui.thinkingToggles, 3);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("collapsed"));
+});
+
+test("cancelling the picker changes nothing", async () => {
+	const { pi, ctx } = await start();
+	ctx.ui.entries = [
+		{ type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] } },
+	];
+	ctx.ui.pick = undefined;
+	ctx.ui.select = async () => undefined;
+	await pi.commands.get("faiku").handler("blocks", ctx);
+	assert.equal(ctx.ui.thinkingToggles, 1);
 });
 
 test("the demo draws the box and fires a toast", async () => {

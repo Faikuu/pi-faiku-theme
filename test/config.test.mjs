@@ -79,8 +79,18 @@ test("describeConfig reports every switch as on or off", () => {
 	assert.ok(described.includes("toasts     off"));
 	assert.ok(described.includes("box        on"));
 	assert.ok(described.includes("history    on, 6 rows"));
+	assert.ok(described.includes("collapse   all"));
 	assert.ok(described.includes("padding    compact"));
-	assert.equal(described.split("\n").length, 11);
+	assert.equal(described.split("\n").length, 12);
+});
+
+test("the collapse mode is read, and only the four modes are", () => {
+	assert.equal(parseConfig({}).collapse, "all");
+	assert.equal(parseConfig({ faiku: { collapse: "thinking" } }).collapse, "thinking");
+	assert.equal(parseConfig({ faiku: { collapse: "off" } }).collapse, "off");
+	// A mode that never existed is a typo, not a new posture.
+	assert.equal(parseConfig({ faiku: { collapse: "everything" } }).collapse, "all");
+	assert.equal(parseConfig({ faiku: { collapse: true } }).collapse, "all");
 });
 
 test("settings live in the pi agent directory", () => {

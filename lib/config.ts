@@ -4,9 +4,12 @@
  * fresh install needs no configuration at all.
  */
 
+import { type CollapseMode, parseCollapseMode } from "./collapse.ts";
 import { DEFAULT_MAX_VISIBLE } from "./history.ts";
 
 export type Padding = "comfortable" | "compact";
+
+export type { CollapseMode };
 
 export interface FaikuConfig {
 	/** Master switch. Off restores pi's own editor, theme and overlays. */
@@ -27,6 +30,8 @@ export interface FaikuConfig {
 	elapsed: boolean;
 	/** Show the history panel above the box when arrow up walks back. */
 	history: boolean;
+	/** Which blocks start collapsed: all, thinking, tools or off. */
+	collapse: CollapseMode;
 	/** Blank row above and below the input, or a tight box. */
 	padding: Padding;
 	/** Placeholder shown while the input is empty. */
@@ -49,6 +54,7 @@ export const DEFAULT_CONFIG: FaikuConfig = {
 	gitStatus: true,
 	elapsed: true,
 	history: true,
+	collapse: "all",
 	padding: "comfortable",
 	placeholder: "Ask anything…",
 	toastTtlMs: 2500,
@@ -91,6 +97,7 @@ export function parseConfig(settings: Record<string, unknown>): FaikuConfig {
 		gitStatus: bool(block.gitStatus, DEFAULT_CONFIG.gitStatus),
 		elapsed: bool(block.elapsed, DEFAULT_CONFIG.elapsed),
 		history: bool(block.history, DEFAULT_CONFIG.history),
+		collapse: parseCollapseMode(block.collapse, DEFAULT_CONFIG.collapse),
 		padding: block.padding === "compact" ? "compact" : DEFAULT_CONFIG.padding,
 		placeholder: text(block.placeholder, DEFAULT_CONFIG.placeholder),
 		toastTtlMs: int(block.toastTtlMs, DEFAULT_CONFIG.toastTtlMs, 400, 20000),
@@ -118,6 +125,7 @@ export function describeConfig(config: FaikuConfig): string {
 		`git status ${onOff(config.gitStatus)}`,
 		`elapsed    ${onOff(config.elapsed)}`,
 		`history    ${onOff(config.history)}, ${config.historyMaxVisible} rows`,
+		`collapse   ${config.collapse}`,
 		`padding    ${config.padding}`,
 		`toast      ${config.toastWidth} cols, ${config.toastTtlMs} ms`,
 	].join("\n");

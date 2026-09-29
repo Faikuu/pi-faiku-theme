@@ -44,6 +44,10 @@ bottom, the one you are on marked with the input's own `❯`.
 sending it, and `esc` gives back whatever you were typing before you opened the
 panel.
 
+And the transcript arrives folded: thinking runs hidden, tool output collapsed,
+even the blocks still streaming. `ctrl+t` and `ctrl+o` expand them as they always
+did, or `/faiku blocks` picks the group for you.
+
 ## Install
 
 ```bash
@@ -104,10 +108,39 @@ errors.
 /faiku git on|off      changed and untracked file counts
 /faiku elapsed on|off  how long the agent has been working
 /faiku history on|off  the prompt history panel above the box
+/faiku collapse <mode> all | thinking | tools | off
+/faiku blocks          pick a collapsed block to expand
 /faiku padding <mode>  comfortable | compact
 /faiku placeholder <s> the empty-input text
 /faiku demo            draw the box and fire a toast
 ```
+
+## Collapsed blocks
+
+The transcript starts folded. Thinking runs are hidden and tool output is collapsed, including
+the blocks that arrive mid-stream, so a long turn stays short while it happens.
+
+Folding is pi's own, not a second renderer: tool output goes through `ui.setToolsExpanded()`,
+and thinking is toggled through the `app.thinking.toggle` handler pi gives the editor, which is
+the same `ctrl+t` you would press. Nothing about `ctrl+t`, `ctrl+o`, or clicking a thinking run
+in fullscreen mode changes.
+
+`/faiku blocks` counts what the branch actually holds and offers only what is collapsed right
+now:
+
+```
+Collapsed blocks
+❯ thinking       3 blocks · collapsed
+  tool output   12 calls · collapsed
+  everything    expand
+  collapse all again
+```
+
+Two things worth knowing. Thinking can only be toggled through pi's handler, which lives on the
+editor, so folding thinking needs the box mounted — with `/faiku box off` the mode still folds
+tool output, and `/faiku info` says what it could not do. And because the toggle is pi's own,
+pi persists the value it left behind, so a collapsed transcript stays collapsed in pi without
+this package until `/faiku collapse off`, `/faiku off` or `ctrl+t` puts it back.
 
 ## Settings
 
@@ -125,6 +158,8 @@ survives a restart:
     "hintRail": true,
     "gitStatus": true,
     "elapsed": true,
+    "history": true,
+    "collapse": "all",
     "padding": "comfortable",
     "placeholder": "Ask anything…",
     "toastTtlMs": 2500,
@@ -183,6 +218,7 @@ rather than drawn as a box too small to be a box.
 | `lib/history.ts` | the prompt history and the panel drawn above the box |
 | `lib/toast.ts` | the toast store and its renderer |
 | `lib/config.ts`, `lib/settings.ts` | configuration and `settings.json` |
+| `lib/collapse.ts` | which blocks start folded, and the picker that unfolds them |
 
 ## Development
 
