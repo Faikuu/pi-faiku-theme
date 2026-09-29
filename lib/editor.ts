@@ -27,7 +27,7 @@
  * on, so the marker is never a guess.
  */
 
-import { CURSOR_MARKER, type Keybinding, type TuiMouseEvent, type TuiMouseEventResult, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, getKeybindings, type Keybinding, type TuiMouseEvent, type TuiMouseEventResult, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { bottomBorder, GLYPHS, joinParts, sideRow, sideRowParts, topBorder } from "./box.ts";
 import { type FaikuConfig, MIN_BOX_WIDTH, MIN_COMFORTABLE_WIDTH } from "./config.ts";
@@ -62,6 +62,21 @@ export interface FaikuEditorOptions {
 	notify: (kind: ToastKind, label: string, detail?: string) => void;
 	/** Read the clipboard, to report how much was copied. Injected for tests. */
 	readClipboard?: () => Promise<string | null | undefined>;
+}
+
+/**
+ * What the base keeps about the list it is showing.
+ *
+ * pi declares these private, so they are not part of the editor we are given;
+ * the list is its own object and the two fields are its state, and the way to
+ * open a directory is to ask pi for the list again rather than build one here.
+ * Read through a cast, and only ever for the answer to a question the base
+ * already answers: is the list up, what is on it, and is the token an `@`.
+ */
+interface AutocompleteInternals {
+	autocompletePrefix: string;
+	autocompleteList?: { getSelectedItem(): { label?: string } | undefined };
+	forceFileAutocomplete(explicitTab?: boolean): void;
 }
 
 export class FaikuEditor extends CustomEditor {
@@ -213,6 +228,7 @@ export class FaikuEditor extends CustomEditor {
 		// The panel gets first refusal on the keys it owns, so a walk is never
 		// interrupted by a submit and a submit is never eaten by the panel.
 		if (this.panelOpen && this.handleHistoryKey(data)) return;
+		if (this.descendIntoDirectory(data)) return;
 		const pasted = this.capturePaste(data);
 		const walking = this.matches(data, "tui.editor.historyPrevious") || this.matches(data, "tui.editor.cursorUp");
 		const before = walking ? this.getText() : "";
@@ -227,6 +243,34 @@ export class FaikuEditor extends CustomEditor {
 			return;
 		}
 		if (this.faikuKeybindings.matches(data, "tui.input.copy")) this.reportCopy();
+	}
+
+	/**
+	 * Enter or Tab on a directory in the `@` picker opens that directory
+	 * instead of closing the picker.
+	 *
+	 * pi accepts the completion and drops the list whatever was selected, so a
+	 * directory used to mean "insert the path and stop" — one extra keystroke
+	 * to get back to where the picker already could have taken you. The base is
+	 * still the one that inserts: it gets the key, and only then is the list
+	 * asked for again, by which point the text names the directory and the list
+	 * is scoped to what is inside it.
+	 *
+	 * Only `@`: a slash command's arguments and an ordinary path keep pi's rule,
+	 * where accepting a directory is a thing you do on the way to a file.
+	 */
+	private descendIntoDirectory(data: string): boolean {
+		const kb = getKeybindings();
+		if (!kb.matches(data, "tui.select.confirm") && !kb.matches(data, "tui.input.tab")) return false;
+		if (!this.isShowingAutocomplete()) return false;
+		const inner = this as unknown as AutocompleteInternals;
+		if (!inner.autocompletePrefix.startsWith("@")) return false;
+		const selected = inner.autocompleteList?.getSelectedItem();
+		// A directory is the one kind of row whose label ends in a separator.
+		if (typeof selected?.label !== "string" || !selected.label.endsWith("/")) return false;
+		super.handleInput(data);
+		inner.forceFileAutocomplete();
+		return true;
 	}
 
 	/**

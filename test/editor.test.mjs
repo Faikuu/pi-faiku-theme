@@ -51,6 +51,7 @@ const KEYS = {
 	down: "\x1b[B",
 	home: "\x01",
 	enter: "\r",
+	tab: "\t",
 	escape: "\x1b",
 	actions: {
 		"tui.editor.cursorUp": "\x1b[A",
@@ -426,4 +427,98 @@ test("the hint rail offers the panel only while it is switched on", () => {
 	assert.ok(lines(editor, 100).at(-1).includes("↑ history"));
 	const off = harness({ info: full, config: { history: false } });
 	assert.ok(!lines(off.editor, 100).at(-1).includes("↑ history"));
+});
+
+// The `@` picker: enter on a directory opens it instead of closing the list.
+
+/**
+ * pi's own picker, shown over an editor that already has its text.
+ *
+ * The provider is a stand-in that answers the two questions the box asks and
+ * nothing else: what is on the list, and what does accepting a row do to the
+ * text. The rules are pi's own — a directory keeps the picker up, a file gets a
+ * trailing space and closes it — so the box is exercised against the behaviour
+ * it actually inherits rather than against a mock of itself.
+ */
+function withPicker(text, items, selectedIndex = 0) {
+	const built = harness({ info: full });
+	const { editor } = built;
+	const selected = () => items[selectedIndex];
+	editor.setAutocompleteProvider({
+		getSuggestions: async () => null,
+		shouldTriggerFileCompletion: () => true,
+		applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
+			const isDirectory = item.label.endsWith("/");
+			const before = (lines[cursorLine] ?? "").slice(0, cursorCol - prefix.length);
+			const next = `${before}${item.value}${isDirectory ? "" : " "}`;
+			return {
+				lines: lines.map((line, index) => (index === cursorLine ? next : line)),
+				cursorLine,
+				cursorCol: before.length + item.value.length + (isDirectory ? 0 : 1),
+			};
+		},
+	});
+	editor.setText(text);
+	editor.autocompletePrefix = text;
+	editor.autocompleteList = { getSelectedItem: selected };
+	editor.autocompleteState = "regular";
+	// Opening a directory means asking the base for the list again, which is a
+	// call into the provider. The answer is the provider's business, so the ask
+	// is what the test counts: reopening is the one thing the box adds.
+	editor.reopened = 0;
+	editor.forceFileAutocomplete = () => {
+		editor.reopened += 1;
+		editor.autocompleteState = "force";
+		editor.autocompleteList = { getSelectedItem: selected };
+		editor.autocompletePrefix = editor.getText();
+	};
+	return built;
+}
+
+const DIRECTORY = { value: "@lib/", label: "lib/" };
+const FILE = { value: "@lib/editor.ts", label: "editor.ts" };
+
+test("enter on a directory opens it rather than closing the picker", () => {
+	const { editor } = withPicker("@", [DIRECTORY, FILE]);
+	editor.handleInput(KEYS.enter);
+	assert.equal(editor.getText(), "@lib/");
+	assert.equal(editor.reopened, 1);
+	assert.equal(editor.isShowingAutocomplete(), true);
+});
+
+test("tab opens a directory the same way enter does", () => {
+	const { editor } = withPicker("@", [DIRECTORY, FILE]);
+	editor.handleInput(KEYS.tab);
+	assert.equal(editor.getText(), "@lib/");
+	assert.equal(editor.reopened, 1);
+	assert.equal(editor.isShowingAutocomplete(), true);
+});
+
+test("enter on a file accepts it and closes the picker, as pi does", () => {
+	const { editor } = withPicker("@lib/", [FILE], 0);
+	editor.handleInput(KEYS.enter);
+	assert.equal(editor.getText(), "@lib/editor.ts ");
+	assert.equal(editor.reopened, 0);
+	assert.equal(editor.isShowingAutocomplete(), false);
+});
+
+test("a slash command argument that names a directory is left to pi", () => {
+	const { editor } = withPicker("/run lib", [{ value: "/run lib/", label: "lib/" }]);
+	editor.handleInput(KEYS.enter);
+	assert.equal(editor.reopened, 0);
+});
+
+test("an ordinary path completion is left to pi too", () => {
+	const { editor } = withPicker("src", [{ value: "src/lib/", label: "lib/" }]);
+	editor.handleInput(KEYS.enter);
+	assert.equal(editor.reopened, 0);
+});
+
+test("enter with no picker up still sends the prompt", () => {
+	const { editor } = harness({ info: full });
+	const sent = [];
+	editor.onSubmit = (text) => sent.push(text);
+	editor.setText("@lib/");
+	editor.handleInput(KEYS.enter);
+	assert.deepEqual(sent, ["@lib/"]);
 });

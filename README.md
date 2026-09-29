@@ -157,6 +157,14 @@ even when pi collapses a large paste into a `[paste #1 +120 lines]` marker. A co
 clipboard a moment later and reports the number of characters. Both toasts are non-capturing
 overlays, so they never take a keystroke.
 
+Enter on a directory in the `@` picker opens that directory instead of closing the list, so
+picking your way into a folder is one keystroke per level rather than one per level plus a
+reopen. Tab does the same. pi still does the inserting — the key is handed to the base, and
+the list is only asked for again once the text names the directory, which scopes it to what is
+inside. Escape still closes the list and leaves the path in the input, and a file still closes
+it as before. Only `@` is treated this way: a slash command's arguments and an ordinary path
+keep pi's rule, where accepting a directory is a step on the way to a file.
+
 Layout is measured in terminal columns, never in string length, and every row is built for
 the width it was handed — which is what makes the frame hold together next to emoji and CJK
 text, at any terminal width down to 24 columns. Below that, pi's own editor is left alone
@@ -171,7 +179,7 @@ rather than drawn as a box too small to be a box.
 | `lib/info.ts` | the session snapshot the rails report |
 | `lib/clock.ts` | the timer: a stopwatch that runs only while the agent works |
 | `lib/git.ts` | branch from `.git/HEAD`, dirty counts from a cached `git status` |
-| `lib/editor.ts` | the framed editor, the history panel and the clipboard events |
+| `lib/editor.ts` | the framed editor, the history panel, the clipboard events, the `@` picker |
 | `lib/history.ts` | the prompt history and the panel drawn above the box |
 | `lib/toast.ts` | the toast store and its renderer |
 | `lib/config.ts`, `lib/settings.ts` | configuration and `settings.json` |
