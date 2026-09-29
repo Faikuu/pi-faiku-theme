@@ -36,7 +36,7 @@ export interface FaikuInfo {
 	dirtyChanged: number | null;
 	/** Untracked files, `null` before the first probe. */
 	dirtyUntracked: number | null;
-	/** Milliseconds since the session started. */
+	/** Milliseconds the agent has spent working this session, not wall time. */
 	elapsedMs: number;
 	/** False while the agent is streaming. */
 	idle: boolean;
@@ -92,10 +92,8 @@ export function sessionTotals(entries: readonly { type: string; message?: unknow
 }
 
 export interface CollectOptions {
-	/** When the session started, for the elapsed clock. */
-	sessionStart: number;
-	/** Injectable clock, so the clock is testable. */
-	now?: () => number;
+	/** Working time so far, from the extension's clock. */
+	elapsedMs?: number;
 	/** Git branch, already resolved by the extension. */
 	branch?: string | null;
 	/** Git status counts, already resolved by the extension. */
@@ -106,7 +104,6 @@ export interface CollectOptions {
 
 /** Take a snapshot of everything the rail can show, from one context. */
 export function collectInfo(ctx: ExtensionContext, options: CollectOptions): FaikuInfo {
-	const now = options.now ?? Date.now;
 	const usage = ctx.getContextUsage?.();
 	const totals = sessionTotals(ctx.sessionManager.getBranch() as readonly { type: string; message?: unknown }[]);
 	return {
@@ -122,7 +119,7 @@ export function collectInfo(ctx: ExtensionContext, options: CollectOptions): Fai
 		branch: options.branch ?? null,
 		dirtyChanged: options.dirty?.changed ?? null,
 		dirtyUntracked: options.dirty?.untracked ?? null,
-		elapsedMs: Math.max(0, now() - options.sessionStart),
+		elapsedMs: Math.max(0, options.elapsedMs ?? 0),
 		idle: ctx.isIdle(),
 	};
 }

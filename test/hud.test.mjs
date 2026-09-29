@@ -58,7 +58,9 @@ test("a clean repository shows no dirty markers at all", () => {
 });
 
 test("the key hints are the last thing to be dropped", () => {
-	assert.deepEqual(emojiOf(railRightSegments()), ["⏎", "⇧⏎", "/", "⌃c", "⌃v"]);
+	assert.deepEqual(emojiOf(railRightSegments()), ["⏎", "⇧⏎", "/", "↑", "⌃c", "⌃v"]);
+	// The history hint is only worth the room while the panel is switched on.
+	assert.deepEqual(emojiOf(railRightSegments(false)), ["⏎", "⇧⏎", "/", "⌃c", "⌃v"]);
 });
 
 test("fitSegments drops the least important fact until the row fits", () => {

@@ -56,8 +56,7 @@ function fakeContext(overrides = {}) {
 
 test("collectInfo takes one snapshot of everything the rails show", () => {
 	const info = collectInfo(fakeContext(), {
-		sessionStart: 1_000,
-		now: () => 254_000,
+		elapsedMs: 253_000,
 		branch: "feat/theme",
 		dirty: { changed: 2, untracked: 1 },
 	});
@@ -77,21 +76,22 @@ test("collectInfo takes one snapshot of everything the rails show", () => {
 });
 
 test("a context pi cannot measure is null, never zero", () => {
-	const info = collectInfo(fakeContext({ getContextUsage: () => undefined }), { sessionStart: 0, now: () => 0 });
+	const info = collectInfo(fakeContext({ getContextUsage: () => undefined }), {});
 	assert.equal(info.contextPercent, null);
 	assert.equal(info.contextTokens, null);
 	assert.equal(contextLabel(info), undefined);
 });
 
 test("a session with no model is reported without one", () => {
-	const info = collectInfo(fakeContext({ model: undefined }), { sessionStart: 0, now: () => 0 });
+	const info = collectInfo(fakeContext({ model: undefined }), {});
 	assert.equal(info.model, undefined);
 	assert.equal(shortModel(info.model), undefined);
 });
 
-test("the clock never runs backwards", () => {
-	const info = collectInfo(fakeContext(), { sessionStart: 10_000, now: () => 0 });
-	assert.equal(info.elapsedMs, 0);
+test("the clock is the agent's working time, and never runs backwards", () => {
+	assert.equal(collectInfo(fakeContext(), {}).elapsedMs, 0);
+	assert.equal(collectInfo(fakeContext(), { elapsedMs: 253_000 }).elapsedMs, 253_000);
+	assert.equal(collectInfo(fakeContext(), { elapsedMs: -1 }).elapsedMs, 0);
 });
 
 test("labels are short enough for a rail", () => {

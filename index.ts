@@ -18,6 +18,7 @@
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import type {
 	AgentEndEvent,
+	AgentStartEvent,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -28,7 +29,9 @@ import type {
 	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { blockChoices, COLLAPSE_MODES, describeDeferredCollapse, describeEffect, planCollapse, tallyBlocks, type BlockTally, type CollapseMode } from "./lib/collapse.ts";
 import { configPatch, describeConfig, type FaikuConfig, parseConfig } from "./lib/config.ts";
+import { createWorkClock } from "./lib/clock.ts";
 import { FaikuEditor, previewFrame } from "./lib/editor.ts";
 import { formatDuration } from "./lib/format.ts";
 import { createDirtyProbe, readGitBranch, type DirtyProbe } from "./lib/git.ts";
@@ -50,13 +53,15 @@ const TOGGLES = {
 	rail: "hintRail",
 	git: "gitStatus",
 	elapsed: "elapsed",
+	history: "history",
 } as const satisfies Record<string, keyof FaikuConfig>;
 
 export default async function faikuTheme(pi: ExtensionAPI) {
 	let config: FaikuConfig = parseConfig(await readSettings(globalSettingsPath()));
 	let ctx: ExtensionContext | undefined;
 	let info: FaikuInfo = emptyInfo();
-	let sessionStart = Date.now();
+	/** The timer: it runs only while the agent works, never while it waits. */
+	const clock = createWorkClock();
 	let branch: string | null = null;
 	let probe: DirtyProbe | undefined;
 	let editor: FaikuEditor | undefined;
@@ -72,6 +77,17 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	 * "on every session start". A session start never sets it: see applyTheme.
 	 */
 	let themeForced = false;
+	/**
+	 * Whether thinking blocks are hidden right now, and the value pi loaded this
+	 * session. pi has no API for this, so the state is tracked here instead: the
+	 * live value follows every flip, whichever key pressed it.
+	 */
+	let thinkingHidden = false;
+	let thinkingHiddenAtStart = false;
+	/** True once the toggle handler has been wrapped on the mounted editor. */
+	let toggleWatched = false;
+	/** Set when a thinking collapse was asked for with no editor to ask through. */
+	let collapseDeferred = false;
 
 	/**
 	 * Ask the terminal for a frame. The toast overlay is drawn on the same pass.
@@ -85,12 +101,22 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		tui?.requestRender(force);
 	}
 
+	/**
+	 * `agent_start` and `agent_end` are the timer's boundaries; `isIdle` is the
+	 * cross-check. An agent that has gone idle ends the run even if its
+	 * `agent_end` never arrived, so the clock cannot count on forever.
+	 */
+	function stopClockIfIdle(): void {
+		if (ctx?.isIdle()) clock.stop();
+	}
+
 	/** Everything the frame shows, refreshed only when something changed. */
 	function refresh(): void {
 		if (!ctx) return;
 		probe?.refresh();
+		stopClockIfIdle();
 		info = collectInfo(ctx, {
-			sessionStart,
+			elapsedMs: clock.elapsed(),
 			branch,
 			dirty: probe?.get() ?? null,
 		});
@@ -169,6 +195,76 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 			});
 			return editor;
 		});
+		// After the call, not inside the factory: pi copies its own action
+		// handlers into the editor it was just handed, and the thinking toggle
+		// is one of them. A remount brings a fresh editor with a fresh map.
+		toggleWatched = false;
+		watchThinkingToggle();
+	}
+
+	/**
+	 * Keep `thinkingHidden` true to what is on screen.
+	 *
+	 * pi exposes no way to read or set thinking visibility, but the editor
+	 * carries pi's own action handlers, and the only thing that ever changes
+	 * this state is `app.thinking.toggle` — whether it came from `ctrl+T` or
+	 * from here. Wrapping the handler is therefore an exact way to follow it,
+	 * with no settings file to race against pi's own writes.
+	 */
+	function watchThinkingToggle(): void {
+		if (toggleWatched || !editor) return;
+		const handlers = editor.actionHandlers;
+		const original = handlers.get("app.thinking.toggle");
+		if (!original) return;
+		handlers.set("app.thinking.toggle", () => {
+			original();
+			thinkingHidden = !thinkingHidden;
+		});
+		toggleWatched = true;
+	}
+
+	/**
+	 * Fire pi's own toggle, which is the only way into thinking visibility.
+	 *
+	 * Returns false when there is no editor to ask, which is the one case the
+	 * package cannot collapse: thinking needs the faiku box mounted.
+	 */
+	function toggleThinking(): boolean {
+		if (!editor) return false;
+		const handler = editor.actionHandlers.get("app.thinking.toggle");
+		if (!handler) return false;
+		handler();
+		return true;
+	}
+
+	/**
+	 * Put the transcript in the posture `faiku.collapse` asks for.
+	 *
+	 * pi keeps its own keys working either way: this only sets the starting
+	 * point, and `/faiku blocks` expands again afterwards.
+	 */
+	function applyCollapse(context: ExtensionContext): void {
+		if (context.mode !== "tui") return;
+		// Switched off, the package puts back the one thing it changed itself:
+		// a thinking state it folded. Tool output is left wherever pi has it.
+		const mode = config.enabled ? config.collapse : "off";
+		const intent = planCollapse(mode, {
+			hideThinkingBlock: thinkingHidden,
+			toolsExpanded: context.ui.getToolsExpanded(),
+			flippedThinking: thinkingHidden !== thinkingHiddenAtStart,
+		});
+		if (intent.thinking !== undefined) {
+			if (toggleThinking()) collapseDeferred = false;
+			else collapseDeferred = true;
+		}
+		if (intent.tools !== undefined && context.ui.getToolsExpanded() !== intent.tools) {
+			context.ui.setToolsExpanded(intent.tools);
+		}
+	}
+
+	/** What the branch holds, for `/faiku blocks` and its own report. */
+	function tallyBranch(): BlockTally {
+		return tallyBlocks(ctx?.sessionManager.getEntries() ?? []);
 	}
 
 	function unmountEditor(): void {
@@ -214,6 +310,9 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	function startTicker(): void {
 		if (ticker) return;
 		ticker = setInterval(() => {
+			// The clock is checked on every tick, even when the timer is hidden,
+			// so it is right the moment it is turned back on.
+			stopClockIfIdle();
 			if (!config.enabled) return;
 			const expired = toasts.tick();
 			if (config.elapsed) refresh();
@@ -239,7 +338,9 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	async function start(context: ExtensionContext): Promise<void> {
 		ctx = context;
 		themeForced = false;
-		sessionStart = Date.now();
+		toggleWatched = false;
+		collapseDeferred = false;
+		clock.reset();
 		info = emptyInfo();
 		branch = config.gitStatus ? await readGitBranch(context.cwd) : null;
 		startGit(context);
@@ -252,6 +353,8 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		if (config.enabled && config.box) mountEditor(context);
 		if (config.applyTheme) applyTheme(context);
 		else restoreTheme(context);
+		// After the editor, because collapsing thinking needs its action handler.
+		applyCollapse(context);
 		mountOverlay(context);
 		startTicker();
 		requestRender(true);
@@ -281,12 +384,61 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		refresh();
 		if (config.applyTheme) applyTheme(context);
 		else restoreTheme(context);
+		// Before the editor goes away: the thinking toggle is only reachable
+		// through it, and a master switch off has to hand pi's transcript back
+		// the way it found it.
+		if (!config.enabled) applyCollapse(context);
 		if (config.enabled && config.box) mountEditor(context);
 		else unmountEditor();
 		if (config.enabled) mountOverlay(context);
 		else unmountOverlay();
+		if (config.enabled) applyCollapse(context);
 		startTicker();
 		requestRender(true);
+	}
+
+	/**
+	 * `/faiku blocks`: the collapsed groups in this branch, and the expansion
+	 * the user picks from them.
+	 *
+	 * Only collapsed groups are offered, so a row that is on screen is one
+	 * whose label tells the truth when it is chosen. pi expands and collapses
+	 * each group as a whole, which is the same thing `ctrl+T` and `ctrl+o` do.
+	 */
+	async function expandBlocks(commandCtx: ExtensionCommandContext): Promise<void> {
+		if (!ctx?.hasUI) {
+			commandCtx.ui.notify("No picker in this mode; use ctrl+T for thinking and ctrl+o for tool output.", "warning");
+			return;
+		}
+		const choices = blockChoices(tallyBranch(), {
+			thinkingHidden,
+			toolsExpanded: commandCtx.ui.getToolsExpanded(),
+		});
+		const picked = await commandCtx.ui.select("Collapsed blocks", choices.map((choice) => choice.label));
+		if (picked === undefined) return;
+		const choice = choices.find((row) => row.label === picked);
+		if (!choice) return;
+
+		let blocked = false;
+		switch (choice.effect) {
+			case "expand-thinking":
+				if (!toggleThinking()) blocked = true;
+				break;
+			case "expand-tools":
+				commandCtx.ui.setToolsExpanded(true);
+				break;
+			case "expand-all":
+				if (!toggleThinking()) blocked = true;
+				commandCtx.ui.setToolsExpanded(true);
+				break;
+			case "collapse-all":
+				if (!thinkingHidden && !toggleThinking()) blocked = true;
+				commandCtx.ui.setToolsExpanded(false);
+				break;
+		}
+		if (blocked) commandCtx.ui.notify(describeDeferredCollapse(), "warning");
+		requestRender(true);
+		commandCtx.ui.notify(describeEffect(choice.effect), "info");
 	}
 
 	pi.registerCommand("faiku", {
@@ -330,6 +482,22 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 					commandCtx.ui.notify(`Faiku padding ${argument}.`, "info");
 					return;
 				}
+				case "collapse": {
+					if (!COLLAPSE_MODES.includes(argument as CollapseMode)) {
+						commandCtx.ui.notify("Usage: /faiku collapse all|thinking|tools|off", "warning");
+						return;
+					}
+					const mode = argument as CollapseMode;
+					if (!(await persist({ collapse: mode }))) return;
+					applyCollapse(commandCtx);
+					requestRender(true);
+					commandCtx.ui.notify(`Faiku collapse ${mode}.`, "info");
+					return;
+				}
+				case "blocks": {
+					await expandBlocks(commandCtx);
+					return;
+				}
 				case "placeholder": {
 					if (argument === "") {
 						commandCtx.ui.notify("Usage: /faiku placeholder <text>", "warning");
@@ -357,7 +525,10 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 							"/faiku header on|off    the fact line above the box",
 							"/faiku rail on|off      the line below the box",
 							"/faiku git on|off       changed and untracked file counts",
-							"/faiku elapsed on|off   the session timer",
+							"/faiku elapsed on|off   the agent's working time",
+							"/faiku history on|off   the prompt history panel above the box",
+							"/faiku collapse <mode>  all | thinking | tools | off",
+							"/faiku blocks           pick a collapsed block to expand",
 							"/faiku padding <mode>   comfortable | compact",
 							"/faiku placeholder <s>  the empty-input text",
 							"/faiku demo             draw the box and fire a toast",
@@ -372,8 +543,9 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 					commandCtx.ui.notify(
 						[
 							describeConfig(config),
+							...(collapseDeferred ? ["", describeDeferredCollapse()] : []),
 							"",
-							`session   ${formatDuration(info.elapsedMs)}${info.idle ? "" : " · working"}`,
+							`working   ${formatDuration(info.elapsedMs)}${info.idle ? "" : " · running"}`,
 							`model     ${info.model ?? "none"}${info.provider ? ` (${info.provider})` : ""}`,
 							`context   ${info.contextPercent === null ? "unknown" : `${Math.round(info.contextPercent)}%`}`,
 							`git       ${info.branch ?? "no repository"}`,
@@ -389,7 +561,12 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event: SessionStartEvent, sessionCtx: ExtensionContext) => {
-		config = parseConfig(await readSettings(globalSettingsPath()));
+		const settings = await readSettings(globalSettingsPath());
+		config = parseConfig(settings);
+		// pi has already read this into its own state by now, so it is the
+		// live starting point, not a setting this package is about to write.
+		thinkingHiddenAtStart = settings.hideThinkingBlock === true;
+		thinkingHidden = thinkingHiddenAtStart;
 		await start(sessionCtx);
 	});
 
@@ -404,7 +581,16 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		requestRender();
 	});
 
+	pi.on("agent_start", (_event: AgentStartEvent) => {
+		// Started after the refresh, so a stale idle flag cannot cancel the run
+		// the event just announced; the next tick is the cross-check's turn.
+		refresh();
+		clock.start();
+		requestRender();
+	});
+
 	pi.on("agent_end", (_event: AgentEndEvent) => {
+		clock.stop();
 		refresh();
 		requestRender();
 	});

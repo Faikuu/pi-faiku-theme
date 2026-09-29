@@ -62,15 +62,22 @@ export function railLeftSegments(info: FaikuInfo): Segment[] {
 	return segments.filter((entry): entry is Segment => entry !== undefined);
 }
 
+export interface HintRailOptions {
+	/** Offer the history panel in the key hints. */
+	history?: boolean;
+}
+
 /** Keys, right-aligned under the box. */
-export function railRightSegments(): Segment[] {
-	return [
+export function railRightSegments(history = true): Segment[] {
+	const hints: Segment[] = [
 		{ emoji: "⏎", text: "send", color: "muted", priority: 100, muted: true },
 		{ emoji: "⇧⏎", text: "newline", color: "muted", priority: 90, muted: true },
 		{ emoji: "/", text: "commands", color: "muted", priority: 80, muted: true },
+		{ emoji: "↑", text: "history", color: "muted", priority: 75, muted: true },
 		{ emoji: "⌃c", text: "copy", color: "muted", priority: 70, muted: true },
 		{ emoji: "⌃v", text: "paste", color: "muted", priority: 60, muted: true },
 	];
+	return hints.filter((seg) => history || seg.text !== "history");
 }
 
 function plain(seg: Segment): string {
@@ -141,11 +148,11 @@ function dropLeastImportant(segments: Segment[]): void {
  * important first — a keystroke reminder is worth less than the branch you are
  * on — and the facts only start going when there is nothing left of the hints.
  */
-export function renderHintRail(info: FaikuInfo, available: number): string {
+export function renderHintRail(info: FaikuInfo, available: number, options: HintRailOptions = {}): string {
 	if (available <= 0) return "";
 	const facts = railLeftSegments(info);
 	// Already in descending priority, so the last one is the first to go.
-	const hints = [...railRightSegments()];
+	const hints = railRightSegments(options.history ?? true);
 	const fits = (left: Segment[], right: Segment[]): boolean =>
 		width(left) + (right.length === 0 ? 0 : width(right) + 3) <= available;
 
