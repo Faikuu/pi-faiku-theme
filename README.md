@@ -65,7 +65,7 @@ the terminal narrows, so nothing is ever truncated mid-word.
 | 🧮 | context window used, and the tokens in it |
 | 🔢 | session input and output tokens |
 | 💲 | session cost, when a model priced it |
-| ⏱ | time since the session started |
+| ⏱ | time the agent has spent working, not time since the session started |
 | 📁 | working directory, last two segments |
 | 🌿 | git branch |
 | ✚ / ＋ | changed and untracked files |
@@ -86,7 +86,7 @@ errors.
 /faiku header on|off   the fact line above the box
 /faiku rail on|off     the line below the box
 /faiku git on|off      changed and untracked file counts
-/faiku elapsed on|off  the session timer
+/faiku elapsed on|off  how long the agent has been working
 /faiku padding <mode>  comfortable | compact
 /faiku placeholder <s> the empty-input text
 /faiku demo            draw the box and fire a toast
@@ -143,6 +143,7 @@ rather than drawn as a box too small to be a box.
 | `lib/frame.ts` | taking pi's editor output apart and reading its labels |
 | `lib/hud.ts` | the header and hint rail: segments, priorities, fitting |
 | `lib/info.ts` | the session snapshot the rails report |
+| `lib/clock.ts` | the timer: a stopwatch that runs only while the agent works |
 | `lib/git.ts` | branch from `.git/HEAD`, dirty counts from a cached `git status` |
 | `lib/editor.ts` | the framed editor and the clipboard events |
 | `lib/toast.ts` | the toast store and its renderer |

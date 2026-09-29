@@ -21,7 +21,7 @@ export interface FaikuConfig {
 	hintRail: boolean;
 	/** Poll git for changed and untracked counts. */
 	gitStatus: boolean;
-	/** Show the session timer. */
+	/** Show the timer: how long the agent has been working this session. */
 	elapsed: boolean;
 	/** Blank row above and below the input, or a tight box. */
 	padding: Padding;

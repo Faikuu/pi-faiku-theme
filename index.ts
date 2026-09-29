@@ -18,6 +18,7 @@
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import type {
 	AgentEndEvent,
+	AgentStartEvent,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -29,6 +30,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { configPatch, describeConfig, type FaikuConfig, parseConfig } from "./lib/config.ts";
+import { createWorkClock } from "./lib/clock.ts";
 import { FaikuEditor, previewFrame } from "./lib/editor.ts";
 import { formatDuration } from "./lib/format.ts";
 import { createDirtyProbe, readGitBranch, type DirtyProbe } from "./lib/git.ts";
@@ -56,7 +58,8 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	let config: FaikuConfig = parseConfig(await readSettings(globalSettingsPath()));
 	let ctx: ExtensionContext | undefined;
 	let info: FaikuInfo = emptyInfo();
-	let sessionStart = Date.now();
+	/** The timer: it runs only while the agent works, never while it waits. */
+	const clock = createWorkClock();
 	let branch: string | null = null;
 	let probe: DirtyProbe | undefined;
 	let editor: FaikuEditor | undefined;
@@ -85,12 +88,22 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		tui?.requestRender(force);
 	}
 
+	/**
+	 * `agent_start` and `agent_end` are the timer's boundaries; `isIdle` is the
+	 * cross-check. An agent that has gone idle ends the run even if its
+	 * `agent_end` never arrived, so the clock cannot count on forever.
+	 */
+	function stopClockIfIdle(): void {
+		if (ctx?.isIdle()) clock.stop();
+	}
+
 	/** Everything the frame shows, refreshed only when something changed. */
 	function refresh(): void {
 		if (!ctx) return;
 		probe?.refresh();
+		stopClockIfIdle();
 		info = collectInfo(ctx, {
-			sessionStart,
+			elapsedMs: clock.elapsed(),
 			branch,
 			dirty: probe?.get() ?? null,
 		});
@@ -214,6 +227,9 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	function startTicker(): void {
 		if (ticker) return;
 		ticker = setInterval(() => {
+			// The clock is checked on every tick, even when the timer is hidden,
+			// so it is right the moment it is turned back on.
+			stopClockIfIdle();
 			if (!config.enabled) return;
 			const expired = toasts.tick();
 			if (config.elapsed) refresh();
@@ -239,7 +255,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	async function start(context: ExtensionContext): Promise<void> {
 		ctx = context;
 		themeForced = false;
-		sessionStart = Date.now();
+		clock.reset();
 		info = emptyInfo();
 		branch = config.gitStatus ? await readGitBranch(context.cwd) : null;
 		startGit(context);
@@ -357,7 +373,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 							"/faiku header on|off    the fact line above the box",
 							"/faiku rail on|off      the line below the box",
 							"/faiku git on|off       changed and untracked file counts",
-							"/faiku elapsed on|off   the session timer",
+							"/faiku elapsed on|off   the agent's working time",
 							"/faiku padding <mode>   comfortable | compact",
 							"/faiku placeholder <s>  the empty-input text",
 							"/faiku demo             draw the box and fire a toast",
@@ -373,7 +389,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 						[
 							describeConfig(config),
 							"",
-							`session   ${formatDuration(info.elapsedMs)}${info.idle ? "" : " · working"}`,
+							`working   ${formatDuration(info.elapsedMs)}${info.idle ? "" : " · running"}`,
 							`model     ${info.model ?? "none"}${info.provider ? ` (${info.provider})` : ""}`,
 							`context   ${info.contextPercent === null ? "unknown" : `${Math.round(info.contextPercent)}%`}`,
 							`git       ${info.branch ?? "no repository"}`,
@@ -404,7 +420,16 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		requestRender();
 	});
 
+	pi.on("agent_start", (_event: AgentStartEvent) => {
+		// Started after the refresh, so a stale idle flag cannot cancel the run
+		// the event just announced; the next tick is the cross-check's turn.
+		refresh();
+		clock.start();
+		requestRender();
+	});
+
 	pi.on("agent_end", (_event: AgentEndEvent) => {
+		clock.stop();
 		refresh();
 		requestRender();
 	});

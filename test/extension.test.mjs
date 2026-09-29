@@ -77,6 +77,15 @@ async function start(settings) {
 }
 
 const readConfig = async () => JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8"));
+const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+
+/** The seconds the `/faiku` report claims the agent has been working. */
+async function reportedWork(pi, ctx) {
+	await pi.commands.get("faiku").handler("info", ctx);
+	const line = ctx.ui.notifications.at(-1).message.split("\n").find((row) => row.startsWith("working"));
+	const [, hours = 0, minutes = 0, seconds = 0] = line.match(/(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s*(?:·|$)/);
+	return Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds);
+}
 
 test("the theme is applied and the box is installed on session start", async () => {
 	const { ctx } = await start();
@@ -203,6 +212,42 @@ test("a configuration written before the session is honoured", async () => {
 	assert.equal(ctx.ui.editorFactory, undefined);
 	assert.equal(ctx.ui.overlays.length, 0);
 	assert.equal(ctx.ui.currentTheme, "dark");
+});
+
+test("the timer counts the agent's working time, not the session's", async () => {
+	// pi flips its own busy flag around these events, and `isIdle` reads it.
+	let idle = true;
+	const { pi, ctx } = await start();
+	ctx.isIdle = () => idle;
+	idle = false;
+	pi.events.get("agent_start")({ type: "agent_start" });
+	// Real seconds, because the clock is the thing under test: one run of work
+	// the report can see, and one idle stretch it must not add to.
+	await wait(1100);
+	idle = true;
+	pi.events.get("agent_end")({ type: "agent_end", messages: [] });
+	assert.equal(await reportedWork(pi, ctx), 1);
+	await wait(1100);
+	assert.equal(await reportedWork(pi, ctx), 1);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("working   1s"));
+});
+
+test("an agent that goes idle without an agent_end stops the clock anyway", async () => {
+	let idle = true;
+	const { pi, ctx } = await start();
+	ctx.isIdle = () => idle;
+	idle = false;
+	pi.events.get("agent_start")({ type: "agent_start" });
+	await wait(1100);
+	const working = await reportedWork(pi, ctx);
+	// The event never arrives. The tick and every refresh must still stop the
+	// clock, so the total freezes within a tick rather than counting on.
+	idle = true;
+	await wait(1200);
+	const stopped = await reportedWork(pi, ctx);
+	assert.ok(stopped <= working + 1, `${stopped}s should not keep counting past ${working}s`);
+	await wait(1100);
+	assert.equal(await reportedWork(pi, ctx), stopped);
 });
 
 test("shutting down releases the editor and the overlay", async () => {
