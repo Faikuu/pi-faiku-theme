@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { resetCapabilitiesCache, setCapabilityOverrides, visibleWidth } from "@earendil-works/pi-tui";
 
 import { DEFAULT_CONFIG, MIN_BOX_WIDTH } from "../lib/config.ts";
 import { FaikuEditor } from "../lib/editor.ts";
@@ -109,11 +109,37 @@ test("wrapped and multi-line text stays inside the frame", () => {
 	assert.equal(text[1].indexOf("second"), text[0].indexOf("first"));
 });
 
+// The opencode amber, as each terminal mode spells it. Both are checked
+// because CI has no truecolor, and a test that only knows truecolor is a test
+// that only passes on the developer's laptop.
+const AMBER = { truecolor: "\x1b[38;2;250;178;131m", "256color": "\x1b[38;5;216m" };
+
 test("the frame turns amber and says so while the agent works", () => {
 	const { editor } = harness({ info: { ...full, idle: false } });
 	const top = editor.render(80)[1];
 	assert.ok(stripAnsi(top).includes("⏳ working"));
-	assert.match(top, /\x1b\[38;2;250;178;131m/, "the working frame is painted in the opencode amber");
+	assert.ok(
+		top.includes(AMBER.truecolor) || top.includes(AMBER["256color"]),
+		`the working frame is painted in the opencode amber, not ${JSON.stringify(top)}`,
+	);
+});
+
+test("the working frame is amber in truecolor, and stays amber without it", (t) => {
+	for (const [trueColor, escape] of [
+		[true, AMBER.truecolor],
+		[false, AMBER["256color"]],
+	]) {
+		t.test(`${trueColor ? "truecolor" : "256color"} terminal`, () => {
+			setCapabilityOverrides({ trueColor });
+			t.after(() => {
+				resetCapabilitiesCache();
+				setCapabilityOverrides({});
+			});
+			const { editor } = harness({ info: { ...full, idle: false } });
+			const top = editor.render(80)[1];
+			assert.ok(top.includes(escape), JSON.stringify(top));
+		});
+	}
 });
 
 test("a terminal too short for padding gets a tight box", () => {
