@@ -172,6 +172,32 @@ test("the demo draws the box and fires a toast", async () => {
 	assert.ok(report.includes("📁"));
 });
 
+test("a theme the user chose is not replaced on session start", async () => {
+	const pi = fakePi();
+	await faikuTheme(pi);
+	const base = fakeContext();
+	const ctx = fakeContext();
+	ctx.ui.theme = { name: "my-own-theme" };
+	await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+	assert.equal(ctx.ui.currentTheme, "dark");
+	// The box is still installed: the theme and the box are independent.
+	assert.equal(typeof ctx.ui.editorFactory, "function");
+	void base;
+});
+
+test("`/faiku theme on` takes the theme back even so", async () => {
+	const pi = fakePi();
+	await faikuTheme(pi);
+	const ctx = fakeContext();
+	ctx.ui.theme = { name: "my-own-theme" };
+	await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+	assert.equal(ctx.ui.currentTheme, "dark");
+	await pi.commands.get("faiku").handler("theme on", ctx);
+	assert.equal(ctx.ui.currentTheme, THEME_NAME);
+	await pi.commands.get("faiku").handler("theme off", ctx);
+	assert.equal(ctx.ui.currentTheme, "my-own-theme");
+});
+
 test("a configuration written before the session is honoured", async () => {
 	const { ctx } = await start({ faiku: { box: false, toasts: false, applyTheme: false, placeholder: "Ready" } });
 	assert.equal(ctx.ui.editorFactory, undefined);

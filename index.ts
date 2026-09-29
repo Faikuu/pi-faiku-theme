@@ -67,11 +67,22 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 	let closing: (() => void) | undefined;
 	/** The theme that was active before Faiku applied its own. */
 	let previousTheme: string | undefined;
+	/**
+	 * Set by `/faiku theme on`, so the command means "right now" as well as
+	 * "on every session start". A session start never sets it: see applyTheme.
+	 */
+	let themeForced = false;
 
-	/** Ask the terminal for a frame. The toast overlay is drawn on the same pass. */
-	function requestRender(): void {
+	/**
+	 * Ask the terminal for a frame. The toast overlay is drawn on the same pass.
+	 *
+	 * `force` repaints every line rather than only the ones that changed, which
+	 * is what a theme change needs: the text on screen has not changed, so a
+	 * differential repaint would leave it in the old colors.
+	 */
+	function requestRender(force = false): void {
 		editor?.invalidate();
-		tui?.requestRender();
+		tui?.requestRender(force);
 	}
 
 	/** Everything the frame shows, refreshed only when something changed. */
@@ -166,13 +177,23 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		ctx?.ui.setEditorComponent(undefined);
 	}
 
+	/**
+	 * Select the `faiku` theme, unless the user has chosen one of their own.
+	 *
+	 * pi's built-in `dark` and `light` are the states a session starts in, so
+	 * replacing them is the whole point of installing this package. Any other
+	 * theme name is somebody's deliberate choice, and overriding it on every
+	 * session start would be rude. `/faiku theme on` overrides even that, once.
+	 */
 	function applyTheme(context: ExtensionContext): void {
 		if (!config.enabled || !config.applyTheme || context.mode !== "tui") return;
-		if (context.ui.theme?.name === THEME_NAME) return;
+		const current = context.ui.theme?.name;
+		if (current === THEME_NAME) return;
+		if (current !== undefined && current !== "dark" && current !== "light" && !themeForced) return;
 		// Only switch when the package's own theme is actually installed, so a
 		// partial install cannot leave the interface without one.
 		if (!context.ui.getAllThemes().some((theme) => theme.name === THEME_NAME)) return;
-		if (context.ui.theme?.name) previousTheme = context.ui.theme.name;
+		if (current) previousTheme = current;
 		const result = context.ui.setTheme(THEME_NAME);
 		if (!result.success) {
 			context.ui.notify(`Could not apply the ${THEME_NAME} theme: ${result.error ?? "unknown error"}`, "warning");
@@ -186,6 +207,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		if (!result.success) {
 			context.ui.notify(`Could not restore the ${previousTheme} theme: ${result.error ?? "unknown error"}`, "warning");
 		}
+		if (previousTheme) context.ui.setTheme(previousTheme);
 		previousTheme = undefined;
 	}
 
@@ -216,16 +238,23 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 
 	async function start(context: ExtensionContext): Promise<void> {
 		ctx = context;
+		themeForced = false;
 		sessionStart = Date.now();
 		info = emptyInfo();
 		branch = config.gitStatus ? await readGitBranch(context.cwd) : null;
 		startGit(context);
 		toasts = createToastStore({ ttlMs: config.toastTtlMs });
 		refresh();
-		applyTheme(context);
-		mountEditor(context);
+		// The editor is mounted first so there is a TUI to repaint through: the
+		// startup screen is already drawn when a session starts, and switching
+		// the theme underneath it changes no text for a differential repaint to
+		// notice.
+		if (config.enabled && config.box) mountEditor(context);
+		if (config.applyTheme) applyTheme(context);
+		else restoreTheme(context);
 		mountOverlay(context);
 		startTicker();
+		requestRender(true);
 	}
 
 	async function persist(changes: Partial<FaikuConfig>): Promise<boolean> {
@@ -257,7 +286,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 		if (config.enabled) mountOverlay(context);
 		else unmountOverlay();
 		startTicker();
-		requestRender();
+		requestRender(true);
 	}
 
 	pi.registerCommand("faiku", {
@@ -276,6 +305,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 					return;
 				}
 				if (!(await persist({ [key]: target }))) return;
+				if (command === "theme" && target) themeForced = true;
 				await reapply(commandCtx);
 				commandCtx.ui.notify(`Faiku ${command} ${target ? "on" : "off"}.`, "info");
 				return;

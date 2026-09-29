@@ -122,22 +122,43 @@ export function renderHeader(info: FaikuInfo, available: number): string {
 	return renderSegments(headerSegments(info), available);
 }
 
+/** Remove the least important segment, breaking ties on the later one. */
+function dropLeastImportant(segments: Segment[]): void {
+	let worst = 0;
+	for (let i = 1; i < segments.length; i++) {
+		if (segments[i].priority <= segments[worst].priority) worst = i;
+	}
+	segments.splice(worst, 1);
+}
+
 /**
  * The line below the box: facts on the left, keys on the right, separated by
- * the space that is left over. Both sides are measured at their natural width
- * first, because a side that has already been stretched to the full width would
- * leave no room for the other one.
+ * the space that is left over.
+ *
+ * Both sides are measured at their natural width first, because a side that has
+ * already been stretched to the full width would leave no room for the other.
+ * When they do not both fit, the hints give way first, one at a time and least
+ * important first — a keystroke reminder is worth less than the branch you are
+ * on — and the facts only start going when there is nothing left of the hints.
  */
 export function renderHintRail(info: FaikuInfo, available: number): string {
 	if (available <= 0) return "";
-	const leftSegments = railLeftSegments(info);
-	const left = painted(leftSegments);
-	const right = painted(railRightSegments());
+	const facts = railLeftSegments(info);
+	// Already in descending priority, so the last one is the first to go.
+	const hints = [...railRightSegments()];
+	const fits = (left: Segment[], right: Segment[]): boolean =>
+		width(left) + (right.length === 0 ? 0 : width(right) + 3) <= available;
+
+	while (hints.length > 0 && !fits(facts, hints)) hints.pop();
+	while (facts.length > 1 && !fits(facts, hints)) dropLeastImportant(facts);
+
+	const left = painted(facts);
+	const right = painted(hints);
 	const leftWidth = visibleWidth(left);
 	const rightWidth = visibleWidth(right);
 	if (leftWidth === 0) return fit(right, available);
 	if (rightWidth > 0 && leftWidth + rightWidth + 3 <= available) {
 		return fit(`${left}${" ".repeat(available - leftWidth - rightWidth)}${right}`, available);
 	}
-	return renderSegments(leftSegments, available);
+	return renderSegments(facts, available);
 }

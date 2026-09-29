@@ -91,10 +91,23 @@ test("the keys sit hard against the right edge when there is room", () => {
 	assert.ok(rail.startsWith("📁 code/FaikuTheme"));
 });
 
-test("the keys are dropped before the facts are", () => {
-	const rail = stripAnsi(renderHintRail(info, 100));
-	assert.ok(!rail.includes("paste"));
+test("a hint gives way to a fact before the facts start going", () => {
+	// At 80 columns the least important hints are dropped, and everything worth
+	// knowing about where you are survives.
+	const rail = stripAnsi(renderHintRail(info, 80));
 	assert.ok(rail.startsWith("📁 code/FaikuTheme"));
+	assert.ok(rail.includes("🌿 feat/theme"));
+	assert.ok(rail.includes("✚2"));
+	assert.ok(rail.includes("⏱ 4m12s"));
+	assert.ok(rail.includes("⏎ send"));
+	assert.ok(!rail.includes("⌃v paste"));
+});
+
+test("a narrow terminal keeps the facts and drops the hints", () => {
+	const rail = stripAnsi(renderHintRail(info, 46));
+	assert.ok(!rail.includes("send"));
+	assert.ok(rail.startsWith("📁 code/FaikuTheme"));
+	assert.ok(rail.includes("🌿 feat/theme"));
 });
 
 test("an unknown width leaves an empty row rather than a broken one", () => {

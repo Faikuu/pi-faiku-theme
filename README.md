@@ -49,7 +49,8 @@ pi -e ./FaikuTheme
 
 Restart pi, or run `/reload`. The package ships two resources: the `faiku` theme
 (`themes/faiku.json`) and the extension that draws the box (`index.ts`). The extension selects
-the theme for you at session start; `/settings` can still choose another one.
+the theme for you at session start, unless you have already chosen a theme of your own —
+`/faiku theme on` takes it back, and `/faiku theme off` puts the old one back.
 
 ## What the box shows
 
