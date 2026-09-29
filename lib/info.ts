@@ -141,7 +141,7 @@ export function contextLabel(info: FaikuInfo): string | undefined {
 	return info.contextTokens === null ? percent : `${percent} · ${formatTokens(info.contextTokens)}`;
 }
 
-/** The rail's location segment, e.g. `code/FaikuTheme`. */
+/** The rail's location segment, e.g. `code/pi-faiku-theme`. */
 export function locationLabel(info: FaikuInfo): string | undefined {
 	if (info.cwd === "") return undefined;
 	return shortenPath(info.cwd, 2);

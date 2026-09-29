@@ -35,7 +35,7 @@ const full = {
 	contextPercent: 12.4,
 	contextTokens: 18_400,
 	cost: 0.42,
-	cwd: "/Users/adam/code/FaikuTheme",
+	cwd: "/Users/adam/code/pi-faiku-theme",
 	branch: "feat/theme",
 	dirtyChanged: 2,
 	elapsedMs: 252_000,
@@ -75,7 +75,7 @@ test("the header names the model and the rail names the place", () => {
 	const rows = lines(editor, 80);
 	assert.ok(rows[0].includes("🧠 claude-sonnet-4-5"));
 	assert.ok(rows[0].includes("🔀 anthropic"));
-	assert.ok(rows.at(-1).includes("📁 code/FaikuTheme"));
+	assert.ok(rows.at(-1).includes("📁 code/pi-faiku-theme"));
 	assert.ok(rows.at(-1).includes("🌿 feat/theme"));
 });
 

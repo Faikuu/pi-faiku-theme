@@ -42,7 +42,7 @@ test("an empty branch is zero, not undefined", () => {
 /** The slice of ExtensionContext that collectInfo reads. */
 function fakeContext(overrides = {}) {
 	return {
-		cwd: "/Users/adam/code/FaikuTheme",
+		cwd: "/Users/adam/code/pi-faiku-theme",
 		model: { id: "anthropic/claude-sonnet-4-5", provider: "anthropic" },
 		thinkingLevel: "high",
 		isIdle: () => false,
@@ -95,10 +95,10 @@ test("the clock never runs backwards", () => {
 });
 
 test("labels are short enough for a rail", () => {
-	const info = { ...emptyInfo(), model: "anthropic/claude-sonnet-4-5", contextPercent: 12.4, contextTokens: 18_400, tokensIn: 4200, tokensOut: 980, cost: 0.42, cwd: "/Users/adam/code/FaikuTheme" };
+	const info = { ...emptyInfo(), model: "anthropic/claude-sonnet-4-5", contextPercent: 12.4, contextTokens: 18_400, tokensIn: 4200, tokensOut: 980, cost: 0.42, cwd: "/Users/adam/code/pi-faiku-theme" };
 	assert.equal(shortModel(info.model), "claude-sonnet-4-5");
 	assert.equal(contextLabel(info), "12% · 18.4k");
-	assert.equal(locationLabel(info), "code/FaikuTheme");
+	assert.equal(locationLabel(info), "code/pi-faiku-theme");
 	assert.equal(tokenLabel(info), "↑4.2k ↓980");
 	assert.equal(costLabel(info), "$0.42");
 	assert.equal(charCount(1284), "1 284");

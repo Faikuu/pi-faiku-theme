@@ -18,11 +18,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Faikuu/FaikuTheme.git"
+    "url": "git+https://github.com/Faikuu/pi-faiku-theme.git"
   },
-  "homepage": "https://github.com/Faikuu/FaikuTheme#readme",
+  "homepage": "https://github.com/Faikuu/pi-faiku-theme#readme",
   "bugs": {
-    "url": "https://github.com/Faikuu/FaikuTheme/issues"
+    "url": "https://github.com/Faikuu/pi-faiku-theme/issues"
   },
   "pi": {
     "extensions": ["./index.ts"],

@@ -1,4 +1,4 @@
-# FaikuTheme
+# pi-faiku-theme
 
 A pi package that makes pi look like [opencode](https://opencode.ai): opencode's default
 dark palette, an ASCII input box with everything pi knows about the session on it, and a
@@ -11,7 +11,7 @@ notification in the top-right corner whenever you copy or paste text.
 │  ❯  Ask anything…                                                                      │
 │                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-  📁 code/FaikuTheme  🌿 feat/theme  ✚2 ＋1  ⏱ 4m12s              ⏎ send  ⇧⏎ newline  ⌃c copy
+  📁 code/pi-faiku-theme  🌿 feat/theme  ✚2 ＋1  ⏱ 4m12s              ⏎ send  ⇧⏎ newline  ⌃c copy
 ```
 
 While the agent is working the frame turns amber and the top rule says so:
@@ -43,8 +43,8 @@ pi -e npm:@faiku/pi-faiku-theme
 From a clone:
 
 ```bash
-pi install ./FaikuTheme
-pi -e ./FaikuTheme
+pi install ./pi-faiku-theme
+pi -e ./pi-faiku-theme
 ```
 
 Restart pi, or run `/reload`. The package ships two resources: the `faiku` theme

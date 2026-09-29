@@ -13,7 +13,7 @@
  * │ ❯  Ask anything…                                              │
  * │                                                                │
  * ╰────────────────────────────────────────────────────────────────╯
- *   📁 code/FaikuTheme  🌿 feat/theme  ⏱ 4m12s      ⏎ send  ⌃c copy
+ *   📁 code/pi-faiku-theme  🌿 feat/theme  ⏱ 4m12s      ⏎ send  ⌃c copy
  * ```
  *
  * The base is always asked for a narrower width than the frame, so every row it

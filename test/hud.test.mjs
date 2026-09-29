@@ -16,7 +16,7 @@ const info = {
 	tokensIn: 4200,
 	tokensOut: 980,
 	cost: 0.42,
-	cwd: "/Users/adam/code/FaikuTheme",
+	cwd: "/Users/adam/code/pi-faiku-theme",
 	branch: "feat/theme",
 	dirtyChanged: 2,
 	dirtyUntracked: 1,
@@ -46,7 +46,7 @@ test("thinking is only worth a segment when it is on", () => {
 
 test("the rail shows the location, the branch and the dirty counts", () => {
 	const segments = railLeftSegments(info);
-	assert.equal(segments[0].text, "code/FaikuTheme");
+	assert.equal(segments[0].text, "code/pi-faiku-theme");
 	assert.equal(segments[1].text, "feat/theme");
 	assert.ok(segments[2].text.includes("✚2"));
 	assert.ok(segments[2].text.includes("＋1"));
@@ -88,14 +88,14 @@ test("the keys sit hard against the right edge when there is room", () => {
 	const rail = stripAnsi(renderHintRail(info, 140));
 	assert.ok(rail.trimEnd().endsWith("⌃v paste"));
 	// …and the facts against the left.
-	assert.ok(rail.startsWith("📁 code/FaikuTheme"));
+	assert.ok(rail.startsWith("📁 code/pi-faiku-theme"));
 });
 
 test("a hint gives way to a fact before the facts start going", () => {
 	// At 80 columns the least important hints are dropped, and everything worth
 	// knowing about where you are survives.
 	const rail = stripAnsi(renderHintRail(info, 80));
-	assert.ok(rail.startsWith("📁 code/FaikuTheme"));
+	assert.ok(rail.startsWith("📁 code/pi-faiku-theme"));
 	assert.ok(rail.includes("🌿 feat/theme"));
 	assert.ok(rail.includes("✚2"));
 	assert.ok(rail.includes("⏱ 4m12s"));
@@ -106,7 +106,7 @@ test("a hint gives way to a fact before the facts start going", () => {
 test("a narrow terminal keeps the facts and drops the hints", () => {
 	const rail = stripAnsi(renderHintRail(info, 46));
 	assert.ok(!rail.includes("send"));
-	assert.ok(rail.startsWith("📁 code/FaikuTheme"));
+	assert.ok(rail.startsWith("📁 code/pi-faiku-theme"));
 	assert.ok(rail.includes("🌿 feat/theme"));
 });
 
