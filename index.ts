@@ -52,6 +52,7 @@ const TOGGLES = {
 	rail: "hintRail",
 	git: "gitStatus",
 	elapsed: "elapsed",
+	history: "history",
 } as const satisfies Record<string, keyof FaikuConfig>;
 
 export default async function faikuTheme(pi: ExtensionAPI) {
@@ -374,6 +375,7 @@ export default async function faikuTheme(pi: ExtensionAPI) {
 							"/faiku rail on|off      the line below the box",
 							"/faiku git on|off       changed and untracked file counts",
 							"/faiku elapsed on|off   the agent's working time",
+							"/faiku history on|off   the prompt history panel above the box",
 							"/faiku padding <mode>   comfortable | compact",
 							"/faiku placeholder <s>  the empty-input text",
 							"/faiku demo             draw the box and fire a toast",

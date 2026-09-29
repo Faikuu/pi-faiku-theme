@@ -78,8 +78,9 @@ test("describeConfig reports every switch as on or off", () => {
 	const described = describeConfig({ ...DEFAULT_CONFIG, toasts: false, padding: "compact" });
 	assert.ok(described.includes("toasts     off"));
 	assert.ok(described.includes("box        on"));
+	assert.ok(described.includes("history    on, 6 rows"));
 	assert.ok(described.includes("padding    compact"));
-	assert.equal(described.split("\n").length, 10);
+	assert.equal(described.split("\n").length, 11);
 });
 
 test("settings live in the pi agent directory", () => {

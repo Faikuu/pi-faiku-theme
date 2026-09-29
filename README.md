@@ -28,6 +28,22 @@ And a clipboard round trip is never silent:
 └──────────────────────────┘          └──────────────────────────┘
 ```
 
+Arrow up already walks back through the prompts you have sent. Now you can see
+where you are: a panel opens above the box, one row per prompt, newest at the
+bottom, the one you are on marked with the input's own `❯`.
+
+```
+┌─ history ──────────────────────────────────────────────────┐
+│   add a toast when a file is written                       │
+│   why is the editor two rows short after a theme change?   │
+│ ❯ refactor the parser into lib/parse.ts                    │
+└─ ↵ restore · esc cancel ───────────────────────────────────┘
+```
+
+`↑` and `↓` move the marker, `↵` puts the prompt back in the input without
+sending it, and `esc` gives back whatever you were typing before you opened the
+panel.
+
 ## Install
 
 ```bash
@@ -87,6 +103,7 @@ errors.
 /faiku rail on|off     the line below the box
 /faiku git on|off      changed and untracked file counts
 /faiku elapsed on|off  how long the agent has been working
+/faiku history on|off  the prompt history panel above the box
 /faiku padding <mode>  comfortable | compact
 /faiku placeholder <s> the empty-input text
 /faiku demo            draw the box and fire a toast
@@ -111,7 +128,8 @@ survives a restart:
     "padding": "comfortable",
     "placeholder": "Ask anything…",
     "toastTtlMs": 2500,
-    "toastWidth": 30
+    "toastWidth": 30,
+    "historyMaxVisible": 6
   }
 }
 ```
@@ -124,6 +142,14 @@ titled top border, its text rows gain vertical rules, and its autocomplete list 
 the frame. Word wrap, scrolling, the hardware cursor pi needs for IME placement, history,
 kill-ring, undo and every app keybinding keep working exactly as they do without the package,
 because they are the base's code.
+
+The history panel is the same bargain. Arrow up is handed to the base, which owns the index,
+the draft and the undo snapshot; the panel only records which entry the base landed on and
+draws it. That is why it opens on pi's terms — a half-typed prompt with the cursor at the end
+still moves the cursor, exactly as it always did — and why the panel and the walk can never
+disagree. `lib/history.ts` holds a mirror of the base's list with the same trimming, the same
+refusal to record the same prompt twice in a row and the same hundred-entry cap, and the
+editor keeps the two in step by recording every prompt pi records.
 
 Copy and paste are detected where they happen, in the editor's `handleInput`: a bracketed
 paste is read before it is handed on, so the toast can report the real size of what arrived
@@ -145,7 +171,8 @@ rather than drawn as a box too small to be a box.
 | `lib/info.ts` | the session snapshot the rails report |
 | `lib/clock.ts` | the timer: a stopwatch that runs only while the agent works |
 | `lib/git.ts` | branch from `.git/HEAD`, dirty counts from a cached `git status` |
-| `lib/editor.ts` | the framed editor and the clipboard events |
+| `lib/editor.ts` | the framed editor, the history panel and the clipboard events |
+| `lib/history.ts` | the prompt history and the panel drawn above the box |
 | `lib/toast.ts` | the toast store and its renderer |
 | `lib/config.ts`, `lib/settings.ts` | configuration and `settings.json` |
 

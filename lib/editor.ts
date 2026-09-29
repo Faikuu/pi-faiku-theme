@@ -19,15 +19,22 @@
  * The base is always asked for a narrower width than the frame, so every row it
  * returns is exactly the interior width, and mouse coordinates are translated
  * back before the base sees them.
+ *
+ * The history panel lives here too, drawn between the header and the top rule.
+ * It is not a second editor and not a second history: arrow up is handed to the
+ * base, which owns the index, the draft and the undo snapshot, and the panel is
+ * only what that walk looks like. The editor knows which entry the base landed
+ * on, so the marker is never a guess.
  */
 
-import { CURSOR_MARKER, type TuiMouseEvent, type TuiMouseEventResult, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, type Keybinding, type TuiMouseEvent, type TuiMouseEventResult, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { bottomBorder, GLYPHS, joinParts, sideRow, sideRowParts, topBorder } from "./box.ts";
 import { type FaikuConfig, MIN_BOX_WIDTH, MIN_COMFORTABLE_WIDTH } from "./config.ts";
 import { formatInt } from "./format.ts";
 import { readBorderLabel, readScrollLabel, readVisibleLineCount, splitEditorLines } from "./frame.ts";
 import { renderHeader, renderHintRail } from "./hud.ts";
+import { createHistoryStore, type HistoryStore, renderHistory } from "./history.ts";
 import type { FaikuInfo } from "./info.ts";
 import { dim, paint, type FaikuColor } from "./palette.ts";
 import { type ToastKind } from "./toast.ts";
@@ -42,6 +49,8 @@ const PROMPT = " ❯ ";
 const PROMPT_BLANK = "   ";
 /** Terminal rows below which the box stops padding itself. */
 const MIN_ROWS_FOR_PADDING = 20;
+/** Rows the editor may claim above the box before the panel has to shrink. */
+const PANEL_ROW_RESERVE = 10;
 /** How long to wait for pi's own copy to land in the clipboard before reading it. */
 const CLIPBOARD_SETTLE_MS = 60;
 
@@ -60,6 +69,14 @@ export class FaikuEditor extends CustomEditor {
 	private readonly faikuKeybindings: KeybindingsManager;
 	/** Bracketed-paste payload being accumulated for the toast, if any. */
 	private faikuPasteBuffer: string | null = null;
+	/** The prompts of this session, mirroring the base's own history. */
+	private readonly historyStore: HistoryStore = createHistoryStore();
+	/** True while the panel is up and the arrow keys walk the list. */
+	private panelOpen = false;
+	/** Index into the list of the entry the base is sitting on, -1 when closed. */
+	private panelIndex = -1;
+	/** What was in the editor before the walk started, restored on cancel. */
+	private panelDraft = "";
 	/** Rows the frame adds above the first text row: header, rule, padding. */
 	private chromeAbove = 0;
 	private disposed = false;
@@ -97,6 +114,9 @@ export class FaikuEditor extends CustomEditor {
 
 		const lines: string[] = [];
 		if (showHeader) lines.push(renderHeader(info, width));
+		if (config.history && this.panelOpen) {
+			lines.push(...renderHistory(this.historyStore.entries(), this.panelIndex, width, this.historyRows()));
+		}
 		this.chromeAbove = lines.length + 1 + (padRows ? 1 : 0);
 
 		const working = !info.idle;
@@ -121,8 +141,18 @@ export class FaikuEditor extends CustomEditor {
 		if (padRows) lines.push(this.row("", width, frameColor));
 
 		lines.push(this.paintBorder(bottomBorder(width, readScrollLabel(frame.bottom, "↓"), GLYPHS.rounded), frameColor, working));
-		if (showRail) lines.push(renderHintRail(info, width));
+		if (showRail) lines.push(renderHintRail(info, width, { history: config.history }));
 		return lines;
+	}
+
+	/**
+	 * How many entries the panel may show, never more than the terminal has room
+	 * for: the panel is drawn in the transcript, so an unbounded list would push
+	 * the conversation off the top of the screen.
+	 */
+	private historyRows(): number {
+		const room = this.tui.terminal.rows - PANEL_ROW_RESERVE;
+		return Math.max(1, Math.min(this.options.config.historyMaxVisible, room));
 	}
 
 	/** The label embedded in the top rule: pi's status, the scroll hint, or a working marker. */
@@ -180,8 +210,14 @@ export class FaikuEditor extends CustomEditor {
 	}
 
 	handleInput(data: string): void {
+		// The panel gets first refusal on the keys it owns, so a walk is never
+		// interrupted by a submit and a submit is never eaten by the panel.
+		if (this.panelOpen && this.handleHistoryKey(data)) return;
 		const pasted = this.capturePaste(data);
+		const walking = this.matches(data, "tui.editor.historyPrevious") || this.matches(data, "tui.editor.cursorUp");
+		const before = walking ? this.getText() : "";
 		super.handleInput(data);
+		if (walking) this.afterHistoryStep(before);
 		if (pasted !== undefined) {
 			this.report("paste", "Pasted", pasted === "" ? "empty" : `${formatInt(pasted.length)} chars`);
 			return;
@@ -191,6 +227,110 @@ export class FaikuEditor extends CustomEditor {
 			return;
 		}
 		if (this.faikuKeybindings.matches(data, "tui.input.copy")) this.reportCopy();
+	}
+
+	/**
+	 * Mirror every prompt the base records, so the panel lists exactly what
+	 * arrow up can reach — including the older prompts pi loads when a session
+	 * is resumed.
+	 */
+	addToHistory(text: string): void {
+		super.addToHistory(text);
+		this.historyStore.add(text);
+	}
+
+	private matches(data: string, action: Keybinding): boolean {
+		return this.faikuKeybindings.matches(data, action);
+	}
+
+	/**
+	 * Did that keypress start a walk through the history?
+	 *
+	 * The base is the only thing that knows: arrow up is history navigation when
+	 * the cursor is at the top of the input, and a cursor movement otherwise, and
+	 * only one of those two changes the text to something the store knows. So the
+	 * panel opens on the outcome rather than on a copy of the base's rules.
+	 */
+	private afterHistoryStep(before: string): void {
+		const after = this.getText();
+		if (after === before) return;
+		const index = this.historyStore.indexOf(after);
+		if (index < 0) return;
+		this.panelDraft = before;
+		this.panelIndex = index;
+		this.panelOpen = true;
+	}
+
+	/**
+	 * One keystroke while the panel is up. Returns true when it was consumed,
+	 * false when the base should have it — typing closes the panel and keeps the
+	 * highlighted prompt as the new starting text.
+	 */
+	private handleHistoryKey(data: string): boolean {
+		if (this.matches(data, "app.interrupt") || data === "\x1b") {
+			this.cancelHistory();
+			return true;
+		}
+		if (this.matches(data, "tui.editor.historyPrevious") || this.matches(data, "tui.editor.cursorUp")) {
+			this.stepHistory(data, -1);
+			return true;
+		}
+		if (this.matches(data, "tui.editor.historyNext") || this.matches(data, "tui.editor.cursorDown")) {
+			this.stepHistory(data, 1);
+			return true;
+		}
+		if (this.matches(data, "tui.input.submit")) {
+			// Confirm means restore, not send: the prompt is in the input and a
+			// second enter is what runs it.
+			this.closeHistory();
+			return true;
+		}
+		this.closeHistory();
+		return false;
+	}
+
+	/**
+	 * Move along the list by handing the key to the base, which owns the index
+	 * and the draft. Only the panel's own cursor is arithmetic: the position is
+	 * tracked as a step from where it was, so a prompt that appears twice in the
+	 * history cannot make the marker jump back to the newer copy.
+	 */
+	private stepHistory(data: string, direction: -1 | 1): void {
+		const before = this.getText();
+		super.handleInput(data);
+		const after = this.getText();
+		// The end of the list: the base declined to move, so the panel stays put.
+		if (after === before) return;
+		// Past the newest entry the base puts the draft back, which ends the walk.
+		if (this.historyStore.indexOf(after) < 0) {
+			this.closeHistory();
+			return;
+		}
+		const size = this.historyStore.size();
+		this.panelIndex = Math.min(Math.max(this.panelIndex - direction, 0), size - 1);
+	}
+
+	/** Close the panel, leaving the prompt in the input and the walk finished. */
+	private closeHistory(): void {
+		this.panelOpen = false;
+		this.panelIndex = -1;
+		// Setting the text to itself is the public way out of the base's browsing
+		// state: it exits the walk without touching the text or the undo stack.
+		this.setText(this.getText());
+	}
+
+	/**
+	 * Close the panel and give back whatever was being typed when it opened.
+	 *
+	 * The text is the whole draft; the cursor lands at the end of it, which is
+	 * where it was in every case that matters — a prompt you were part way
+	 * through typing.
+	 */
+	private cancelHistory(): void {
+		const draft = this.panelDraft;
+		this.panelDraft = "";
+		this.closeHistory();
+		this.setText(draft);
 	}
 
 	/**
@@ -244,6 +384,8 @@ export class FaikuEditor extends CustomEditor {
 	dispose(): void {
 		this.disposed = true;
 		this.faikuPasteBuffer = null;
+		this.panelOpen = false;
+		this.panelDraft = "";
 	}
 }
 

@@ -4,6 +4,7 @@ import { resetCapabilitiesCache, setCapabilityOverrides, visibleWidth } from "@e
 
 import { DEFAULT_CONFIG, MIN_BOX_WIDTH } from "../lib/config.ts";
 import { FaikuEditor } from "../lib/editor.ts";
+import { MARKER } from "../lib/history.ts";
 import { emptyInfo } from "../lib/info.ts";
 import { stripAnsi } from "../lib/palette.ts";
 
@@ -43,6 +44,41 @@ const full = {
 };
 
 const lines = (editor, width) => editor.render(width).map(stripAnsi);
+
+/** The key sequences the box reacts to, as the terminal sends them. */
+const KEYS = {
+	up: "\x1b[A",
+	down: "\x1b[B",
+	home: "\x01",
+	enter: "\r",
+	escape: "\x1b",
+	actions: {
+		"tui.editor.cursorUp": "\x1b[A",
+		"tui.editor.cursorDown": "\x1b[B",
+		"tui.editor.cursorLineStart": "\x01",
+		"tui.input.submit": "\r",
+		"app.interrupt": "\x1b",
+	},
+};
+
+/** The rows of the panel: the square box and everything between its rules. */
+const panelRows = (editor, width = 60) => {
+	const rows = lines(editor, width);
+	const top = rows.findIndex((row) => row.startsWith("┌"));
+	if (top < 0) return [];
+	const bottom = rows.findIndex((row) => row.startsWith("└"));
+	return rows.slice(top, bottom + 1);
+};
+
+/** The prompts the panel is offering, as they are drawn, top row first. */
+const panelEntries = (editor, width = 60) =>
+	panelRows(editor, width)
+		.slice(1, -1)
+		.map((row) => {
+			const body = row.slice(1, -1).trim();
+			const marked = body.startsWith(MARKER);
+			return { text: (marked ? body.slice(MARKER.length) : body).trimEnd(), marked };
+		});
 
 test("every row of the box is exactly as wide as the terminal", () => {
 	const { editor } = harness({ info: full });
@@ -248,4 +284,146 @@ test("ordinary typing is not mistaken for a clipboard event", () => {
 	editor.handleInput("i");
 	assert.equal(editor.getText(), "hi");
 	assert.deepEqual(notifiers, []);
+});
+
+// The history panel: arrow up opens it, the arrows walk it, enter restores.
+
+/** An editor with prompts already sent, and a record of what was submitted. */
+function withHistory(overrides = {}, ...prompts) {
+	const sent = [];
+	const built = harness({ ...overrides, actions: { ...KEYS.actions, ...overrides.actions } });
+	built.editor.onSubmit = (text) => sent.push(text);
+	for (const prompt of prompts) built.editor.addToHistory(prompt);
+	return { ...built, sent };
+}
+
+test("arrow up opens the panel above the box, newest prompt marked", () => {
+	const { editor } = withHistory({ info: full }, "add a toast on write", "refactor the parser");
+	editor.handleInput(KEYS.up);
+	assert.equal(editor.getText(), "refactor the parser");
+	assert.deepEqual(
+		panelEntries(editor).map((entry) => entry.text),
+		["add a toast on write", "refactor the parser"],
+	);
+	const marked = panelEntries(editor).filter((entry) => entry.marked);
+	assert.equal(marked.length, 1);
+	assert.equal(marked[0].text, "refactor the parser");
+});
+
+test("the panel sits directly above the input box", () => {
+	const { editor } = withHistory({ info: full }, "an older prompt", "the newest prompt");
+	editor.handleInput(KEYS.up);
+	const rows = lines(editor, 60);
+	const panel = rows.findIndex((row) => row.startsWith("┌"));
+	const box = rows.findIndex((row) => row.startsWith("╭"));
+	assert.ok(panel >= 0);
+	assert.equal(box, panel + panelRows(editor).length);
+	// The highlighted prompt is in the editor as well as in the panel.
+	assert.ok(rows[box + 2].includes("the newest prompt"));
+});
+
+test("walking up and down moves the marker, not the list", () => {
+	const { editor } = withHistory({ info: full }, "oldest", "middle", "newest");
+	editor.handleInput(KEYS.up);
+	assert.equal(panelEntries(editor).find((entry) => entry.marked).text, "newest");
+	editor.handleInput(KEYS.up);
+	assert.equal(editor.getText(), "middle");
+	assert.equal(panelEntries(editor).find((entry) => entry.marked).text, "middle");
+	editor.handleInput(KEYS.up);
+	assert.equal(editor.getText(), "oldest");
+	// Past the oldest there is nowhere left to go, and the panel says so.
+	editor.handleInput(KEYS.up);
+	assert.equal(editor.getText(), "oldest");
+	assert.equal(panelRows(editor).length, 5);
+	editor.handleInput(KEYS.down);
+	assert.equal(editor.getText(), "middle");
+	assert.equal(panelEntries(editor).find((entry) => entry.marked).text, "middle");
+});
+
+test("walking past the newest prompt puts the draft back and closes the panel", () => {
+	const { editor } = withHistory({ info: full }, "an older prompt", "the newest prompt");
+	editor.handleInput("half a th");
+	// Arrow up only walks the history from the top of the input, which is pi's
+	// own rule: a half-typed prompt with the cursor at the end moves the cursor.
+	editor.handleInput(KEYS.up);
+	assert.equal(editor.getText(), "half a th");
+	assert.deepEqual(panelRows(editor), []);
+	editor.handleInput(KEYS.home);
+	editor.handleInput(KEYS.up);
+	assert.equal(editor.getText(), "the newest prompt");
+	editor.handleInput(KEYS.down);
+	assert.equal(editor.getText(), "half a th");
+	assert.deepEqual(panelRows(editor), []);
+});
+
+test("enter restores the prompt and sends nothing", () => {
+	const { editor, sent } = withHistory({ info: full }, "add a toast on write", "refactor the parser");
+	editor.handleInput(KEYS.up);
+	editor.handleInput(KEYS.up);
+	editor.handleInput(KEYS.enter);
+	assert.equal(editor.getText(), "add a toast on write");
+	assert.deepEqual(sent, []);
+	assert.deepEqual(panelRows(editor), []);
+	// A second enter is what sends it.
+	editor.handleInput(KEYS.enter);
+	assert.deepEqual(sent, ["add a toast on write"]);
+});
+
+test("escape gives back what was being typed", () => {
+	const { editor } = withHistory({ info: full }, "an older prompt");
+	editor.handleInput("half a th");
+	editor.handleInput(KEYS.home);
+	editor.handleInput(KEYS.up);
+	assert.equal(editor.getText(), "an older prompt");
+	editor.handleInput(KEYS.escape);
+	assert.equal(editor.getText(), "half a th");
+	assert.deepEqual(panelRows(editor), []);
+});
+
+test("typing keeps the highlighted prompt and closes the panel", () => {
+	const { editor } = withHistory({ info: full }, "an older prompt");
+	editor.handleInput(KEYS.up);
+	editor.handleInput("!");
+	assert.equal(editor.getText(), "an older prompt!");
+	assert.deepEqual(panelRows(editor), []);
+});
+
+test("arrow up with nothing sent opens no panel", () => {
+	const { editor } = withHistory({ info: full });
+	editor.handleInput(KEYS.up);
+	assert.deepEqual(panelRows(editor), []);
+	assert.equal(editor.getText(), "");
+});
+
+test("arrow up inside a multi-line prompt moves the cursor, not the history", () => {
+	const { editor } = withHistory({ info: full }, "an older prompt");
+	editor.setText("first line\nsecond line");
+	editor.handleInput(KEYS.up);
+	// The base moved the cursor onto the line above, so there is nothing to show.
+	assert.deepEqual(panelRows(editor), []);
+	assert.equal(editor.getText(), "first line\nsecond line");
+});
+
+test("the panel shows no more rows than it was configured for", () => {
+	const { editor } = withHistory({ info: full, config: { historyMaxVisible: 2 } }, "one", "two", "three", "four");
+	editor.handleInput(KEYS.up);
+	assert.equal(panelRows(editor).length, 4);
+	// The window slides so the marker is never off the panel.
+	editor.handleInput(KEYS.up);
+	assert.equal(panelEntries(editor).length, 2);
+	assert.equal(panelEntries(editor).find((entry) => entry.marked).text, "three");
+});
+
+test("the panel can be switched off, and the box still walks the history", () => {
+	const { editor } = withHistory({ info: full, config: { history: false } }, "an older prompt");
+	editor.handleInput(KEYS.up);
+	assert.deepEqual(panelRows(editor), []);
+	assert.equal(editor.getText(), "an older prompt");
+});
+
+test("the hint rail offers the panel only while it is switched on", () => {
+	const { editor } = harness({ info: full });
+	assert.ok(lines(editor, 100).at(-1).includes("↑ history"));
+	const off = harness({ info: full, config: { history: false } });
+	assert.ok(!lines(off.editor, 100).at(-1).includes("↑ history"));
 });

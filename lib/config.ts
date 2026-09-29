@@ -4,6 +4,8 @@
  * fresh install needs no configuration at all.
  */
 
+import { DEFAULT_MAX_VISIBLE } from "./history.ts";
+
 export type Padding = "comfortable" | "compact";
 
 export interface FaikuConfig {
@@ -23,6 +25,8 @@ export interface FaikuConfig {
 	gitStatus: boolean;
 	/** Show the timer: how long the agent has been working this session. */
 	elapsed: boolean;
+	/** Show the history panel above the box when arrow up walks back. */
+	history: boolean;
 	/** Blank row above and below the input, or a tight box. */
 	padding: Padding;
 	/** Placeholder shown while the input is empty. */
@@ -31,6 +35,8 @@ export interface FaikuConfig {
 	toastTtlMs: number;
 	/** Toast width in columns. */
 	toastWidth: number;
+	/** How many prompts the history panel shows at once. */
+	historyMaxVisible: number;
 }
 
 export const DEFAULT_CONFIG: FaikuConfig = {
@@ -42,10 +48,12 @@ export const DEFAULT_CONFIG: FaikuConfig = {
 	hintRail: true,
 	gitStatus: true,
 	elapsed: true,
+	history: true,
 	padding: "comfortable",
 	placeholder: "Ask anything…",
 	toastTtlMs: 2500,
 	toastWidth: 30,
+	historyMaxVisible: DEFAULT_MAX_VISIBLE,
 };
 
 /** Below this the box stops pretending to be a box and pi's own editor returns. */
@@ -82,10 +90,12 @@ export function parseConfig(settings: Record<string, unknown>): FaikuConfig {
 		hintRail: bool(block.hintRail, DEFAULT_CONFIG.hintRail),
 		gitStatus: bool(block.gitStatus, DEFAULT_CONFIG.gitStatus),
 		elapsed: bool(block.elapsed, DEFAULT_CONFIG.elapsed),
+		history: bool(block.history, DEFAULT_CONFIG.history),
 		padding: block.padding === "compact" ? "compact" : DEFAULT_CONFIG.padding,
 		placeholder: text(block.placeholder, DEFAULT_CONFIG.placeholder),
 		toastTtlMs: int(block.toastTtlMs, DEFAULT_CONFIG.toastTtlMs, 400, 20000),
 		toastWidth: int(block.toastWidth, DEFAULT_CONFIG.toastWidth, 18, 60),
+		historyMaxVisible: int(block.historyMaxVisible, DEFAULT_CONFIG.historyMaxVisible, 1, 20),
 	};
 }
 
@@ -107,6 +117,7 @@ export function describeConfig(config: FaikuConfig): string {
 		`hint rail  ${onOff(config.hintRail)}`,
 		`git status ${onOff(config.gitStatus)}`,
 		`elapsed    ${onOff(config.elapsed)}`,
+		`history    ${onOff(config.history)}, ${config.historyMaxVisible} rows`,
 		`padding    ${config.padding}`,
 		`toast      ${config.toastWidth} cols, ${config.toastTtlMs} ms`,
 	].join("\n");
