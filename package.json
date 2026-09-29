@@ -1,6 +1,6 @@
 {
   "name": "@faiku/pi-faiku-theme",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi theme and ASCII input box in opencode's default style, with top-right copy/paste toasts",
   "author": "Faiku",
   "license": "MIT",
@@ -25,8 +25,12 @@
     "url": "https://github.com/Faikuu/pi-faiku-theme/issues"
   },
   "pi": {
-    "extensions": ["./index.ts"],
-    "themes": ["./themes/*.json"]
+    "extensions": [
+      "./index.ts"
+    ],
+    "themes": [
+      "./themes/*.json"
+    ]
   },
   "files": [
     "index.ts",
