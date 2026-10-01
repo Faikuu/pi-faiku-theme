@@ -10,19 +10,46 @@ const agentDir = await mkdtemp(join(tmpdir(), "faiku-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const { default: faikuTheme, THEME_NAME } = await import("../index.ts");
+const { stripAnsi } = await import("../lib/palette.ts");
 
 /** Just enough of the extension API to drive the wiring. */
 function fakePi() {
 	const commands = new Map();
 	const events = new Map();
-	return {
+	const shortcuts = new Map();
+	const sent = [];
+	const pi = {
 		commands,
 		events,
+		shortcuts,
+		/** Text pi was asked to dispatch, i.e. the commands the bar ran. */
+		sent,
 		registerCommand: (name, definition) => commands.set(name, definition),
 		registerTool: () => {},
-		registerShortcut: () => {},
+		registerShortcut: (key, options) => shortcuts.set(key, options),
 		on: (event, handler) => events.set(event, handler),
+		getCommands: () => [...commands.keys()].map((name) => ({ name })),
+		sendUserMessage: (text) => {
+			sent.push(text);
+		},
 	};
+	return pi;
+}
+
+/** Which renderer the fake pi hands out: fullscreen, or the regular inline one. */
+let tuiMode = "fullscreen";
+
+/** Just enough of pi's renderer: a fixed screen, or the regular inline one. */
+function fakeTui() {
+	return { mode: tuiMode, terminal: { rows: 40, columns: 100 }, requestRender: () => {} };
+}
+
+/** The rows a mounted overlay would draw, with its escape codes off. */
+async function overlayRows(ctx, anchor, width = 100) {
+	const entry = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === anchor);
+	if (!entry) return undefined;
+	const component = await entry.factory(fakeTui(), {}, { matches: () => false }, () => {});
+	return component.render(width).map(stripAnsi);
 }
 
 function fakeContext(overrides = {}) {
@@ -50,7 +77,7 @@ function fakeContext(overrides = {}) {
 			// handlers into the editor, so the fake does the same: the collapse
 			// feature reaches thinking visibility through those handlers.
 			if (factory) {
-				const component = factory({ terminal: { rows: 40, columns: 100 }, requestRender: () => {} }, { borderColor: (text) => text }, { matches: () => false });
+				const component = factory(fakeTui(), { borderColor: (text) => text }, { matches: () => false });
 				component.actionHandlers.set("app.thinking.toggle", () => {
 					ui.thinkingToggles += 1;
 				});
@@ -67,9 +94,21 @@ function fakeContext(overrides = {}) {
 			return options[ui.pick ?? 0];
 		},
 		notify: (message, level) => notifications.push({ message, level }),
+		statuses: [],
+		setStatus: (key, text) => {
+			if (text === undefined) ui.statuses = ui.statuses.filter((row) => row.key !== key);
+			else ui.statuses.push({ key, text });
+		},
 		custom: (factory, options) => {
-			ui.overlays.push({ factory, options });
+			const entry = { factory, options, closed: false };
+			ui.overlays.push(entry);
 			options.onHandle?.({ hide: () => {}, setHidden: () => {} });
+			// pi shows the overlay by calling the factory and keeps it until the
+			// component calls back with `done`, so the fake does the same: an
+			// unmount is only observable if the factory ran.
+			factory(fakeTui(), {}, { matches: () => false }, () => {
+				entry.closed = true;
+			});
 			return new Promise(() => {});
 		},
 		theme: { name: "dark" },
@@ -83,14 +122,22 @@ function fakeContext(overrides = {}) {
 		thinkingLevel: "medium",
 		isIdle: () => true,
 		getContextUsage: () => ({ tokens: 1000, contextWindow: 200_000, percent: 1 }),
-		sessionManager: { getBranch: () => [], getEntries: () => ui.entries ?? [] },
+		sessionManager: {
+			getBranch: () => [],
+			getEntries: () => ui.entries ?? [],
+			getSessionDir: () => agentDir,
+			getSessionFile: () => ui.sessionFile,
+			getSessionName: () => ui.sessionName,
+		},
 		...overrides,
 	};
 }
 
-async function start(settings) {
+async function start(settings, options = {}) {
+	// A restart reads what the last session left behind; only a fresh start
+	// replaces the file.
 	if (settings) await writeFile(join(agentDir, "settings.json"), JSON.stringify(settings));
-	else await writeFile(join(agentDir, "settings.json"), JSON.stringify({}));
+	else if (!options.keepSettings) await writeFile(join(agentDir, "settings.json"), JSON.stringify({}));
 	const pi = fakePi();
 	await faikuTheme(pi);
 	const ctx = fakeContext();
@@ -114,10 +161,15 @@ test("the theme is applied and the box is installed on session start", async () 
 	assert.equal(ctx.ui.currentTheme, THEME_NAME);
 	assert.equal(typeof ctx.ui.editorFactory, "function");
 	// The toast overlay is a non-capturing top-right overlay.
-	assert.equal(ctx.ui.overlays.length, 1);
-	assert.equal(ctx.ui.overlays[0].options.overlay, true);
-	assert.equal(ctx.ui.overlays[0].options.overlayOptions().anchor, "top-right");
-	assert.equal(ctx.ui.overlays[0].options.overlayOptions().nonCapturing, true);
+	const toasts = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-right");
+	assert.ok(toasts);
+	assert.equal(toasts.options.overlay, true);
+	assert.equal(toasts.options.overlayOptions().nonCapturing, true);
+	// And the tab bar is a second non-capturing overlay across the top row.
+	const bar = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-left");
+	assert.ok(bar);
+	assert.equal(bar.options.overlayOptions().width, "100%");
+	assert.equal(bar.options.overlayOptions().nonCapturing, true);
 });
 
 test("a missing theme is not applied, and says nothing about it", async () => {
@@ -373,8 +425,21 @@ test("`/faiku theme on` takes the theme back even so", async () => {
 test("a configuration written before the session is honoured", async () => {
 	const { ctx } = await start({ faiku: { box: false, toasts: false, applyTheme: false, placeholder: "Ready" } });
 	assert.equal(ctx.ui.editorFactory, undefined);
-	assert.equal(ctx.ui.overlays.length, 0);
+	// Toasts are off, so the only thing left on screen is the tab bar.
+	assert.equal(ctx.ui.overlays.length, 1);
+	assert.equal(ctx.ui.overlays[0].options.overlayOptions().anchor, "top-left");
 	assert.equal(ctx.ui.currentTheme, "dark");
+});
+
+test("`faiku.tabs off` takes the bar away and puts it back", async () => {
+	const { pi, ctx } = await start();
+	const command = pi.commands.get("faiku");
+	await command.handler("tabs off", ctx);
+	assert.equal(ctx.ui.overlays.filter((overlay) => overlay.options.overlayOptions().anchor === "top-left").length, 1);
+	// Turning it off unmounts; the handle is gone rather than hidden.
+	assert.equal((await readConfig()).faiku.tabs, false);
+	await command.handler("tabs on", ctx);
+	assert.equal((await readConfig()).faiku.tabs, true);
 });
 
 test("the timer counts the agent's working time, not the session's", async () => {
@@ -419,4 +484,363 @@ test("shutting down releases the editor and the overlay", async () => {
 	// Nothing may throw, and a second shutdown must be harmless too.
 	pi.events.get("session_shutdown")({ type: "session_shutdown" });
 	assert.equal(ctx.ui.editorFactory === undefined || typeof ctx.ui.editorFactory === "function", true);
+});
+
+// --- the tab bar ---------------------------------------------------------
+
+const { CURRENT_SESSION_VERSION } = await import("@earendil-works/pi-coding-agent");
+
+/** Write a session file pi will list: a header, then one user message. */
+async function writeSession(sessionDir, id, name, text, timestamp) {
+	const path = join(sessionDir, `${timestamp}-${id}.jsonl`);
+	const header = { type: "session", version: CURRENT_SESSION_VERSION, id, timestamp: new Date(timestamp).toISOString(), cwd: agentDir };
+	const info = name ? { type: "session_info", name } : undefined;
+	const message = { type: "message", id: `${id}-1`, parentId: null, timestamp: new Date(timestamp + 1000).toISOString(), message: { role: "user", content: [{ type: "text", text }] } };
+	await writeFile(path, `${[header, info, message].filter(Boolean).map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+	return path;
+}
+
+/** Start a session whose bar can see `sessions`, and return the bar component. */
+async function startWithTabs(sessions = {}, settings = undefined) {
+	const sessionDir = await mkdtemp(join(tmpdir(), "faiku-sessions-"));
+	const current = await writeSession(sessionDir, "current", undefined, "the chat you are in", 1_700_000_000_000);
+	await writeSession(sessionDir, "older", "api cleanup", "why is the editor two rows short", 1_600_000_000_000);
+	for (const [name, text, at] of Object.entries(sessions)) {
+		await writeSession(sessionDir, name, undefined, text, at);
+	}
+	await writeFile(join(agentDir, "settings.json"), JSON.stringify(settings ?? {}));
+	const pi = fakePi();
+	await faikuTheme(pi);
+	const ctx = fakeContext();
+	ctx.sessionManager.getSessionDir = () => sessionDir;
+	ctx.sessionManager.getSessionFile = () => current;
+	ctx.switchSession = async (path) => {
+		ctx.switchedTo = path;
+		return { cancelled: false };
+	};
+	ctx.newSession = async () => {
+		ctx.newedSession = true;
+		return { cancelled: false };
+	};
+	await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+	// The bar loads its sessions on session start; one turn of the event loop is
+	// all the read takes.
+	await wait(50);
+	const entry = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-left");
+	const component = await entry.factory(fakeTui(), {}, { matches: () => false }, () => {});
+	// pi renders an overlay before anything can be clicked on it, and the hit
+	// regions only exist once it has.
+	component.render(100);
+	return { pi, ctx, component, row: () => stripAnsi(component.render(100)[0] ?? "") };
+}
+
+/** A click at the column `label` starts on, inside its tab. */
+function clickOn(component, row, label, type = "click", button = "left") {
+	const x = row.indexOf(label) + 2;
+	component.handleMouse({ type, button, x, y: 0, screenX: x, screenY: 0, width: 100, height: 1, shift: false, alt: false, ctrl: false });
+}
+
+test("the bar names the chats of this directory, and marks the current one", async () => {
+	const { row } = await startWithTabs();
+	const bar = row();
+	assert.match(bar, /❯ the chat you are in/);
+	assert.match(bar, /api cleanup/);
+	assert.match(bar, /\+/);
+});
+
+test("clicking a tab runs `/faiku tab <n>` rather than typing it", async () => {
+	const { pi, ctx, component, row } = await startWithTabs();
+	// A press claims the gesture, so a drag that ends on the bar cannot switch.
+	assert.deepEqual(component.handleMouse({ type: "press", button: "left", x: 2, y: 0, screenX: 2, screenY: 0, width: 100, height: 1, shift: false, alt: false, ctrl: false }), {
+		handled: true,
+		capture: true,
+		render: false,
+	});
+	clickOn(component, row(), "api cleanup");
+	assert.deepEqual(pi.sent, ["/faiku tab 2"]);
+	// pi expands the command itself, which is how the switch gets a command context.
+	assert.equal(ctx.switchedTo, undefined, "the command runs pi's way, not this test's");
+});
+
+test("clicking the trailing plus starts a new chat", async () => {
+	const { pi, component, row } = await startWithTabs();
+	const plus = row().indexOf("+");
+	component.handleMouse({ type: "click", button: "left", x: plus, y: 0, screenX: plus, screenY: 0, width: 100, height: 1, shift: false, alt: false, ctrl: false });
+	assert.deepEqual(pi.sent, ["/faiku tab new"]);
+});
+
+test("the bar draws a rule under itself, and the toasts start below it", async () => {
+	const { ctx } = await startWithTabs();
+	const bar = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-left");
+	const component = await bar.factory(fakeTui(), {}, { matches: () => false }, () => {});
+	const rows = component.render(80).map(stripAnsi);
+	assert.equal(rows.length, 2);
+	assert.equal(rows[1], "─".repeat(80));
+	// Two rows are taken off the top, so a toast cannot land inside the bar.
+	const toasts = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-right");
+	assert.equal(toasts.options.overlayOptions().margin.top, 2);
+});
+
+test("with the bar off, the toasts go back to the first row", async () => {
+	const { pi, ctx } = await startWithTabs();
+	await pi.commands.get("faiku").handler("tabs off", ctx);
+	const toasts = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-right");
+	assert.equal(toasts.options.overlayOptions().margin.top, 0);
+});
+
+test("a click on the rule under a tab is not a click on the tab", async () => {
+	const { pi, component, row } = await startWithTabs();
+	const bar = component.render(100);
+	const column = stripAnsi(bar[0]).indexOf("api cleanup") + 2;
+	// The rule is row 1, and it is only decoration.
+	component.handleMouse({ type: "click", button: "left", x: column, y: 1, screenX: column, screenY: 1, width: 100, height: 2, shift: false, alt: false, ctrl: false });
+	assert.deepEqual(pi.sent, []);
+	// Row 0 at the same column still switches.
+	component.handleMouse({ type: "click", button: "left", x: column, y: 0, screenX: column, screenY: 0, width: 100, height: 2, shift: false, alt: false, ctrl: false });
+	assert.deepEqual(pi.sent, ["/faiku tab 2"]);
+});
+
+test("a click on the rule is not a click on a tab", async () => {
+	const { pi, component } = await startWithTabs();
+	component.render(100);
+	component.handleMouse({ type: "click", button: "left", x: 90, y: 0, screenX: 90, screenY: 0, width: 100, height: 1, shift: false, alt: false, ctrl: false });
+	assert.deepEqual(pi.sent, []);
+});
+
+test("middle-clicking a tab closes it, and `reopen` brings it back", async () => {
+	const { pi, ctx, component, row } = await startWithTabs();
+	clickOn(component, row(), "api cleanup", "press", "middle");
+	await wait(20);
+	assert.deepEqual((await readConfig()).faiku.tabsClosed.length, 1);
+	await wait(20);
+	// Closing it again is refused: the chat is already hidden.
+	clickOn(component, row(), "api cleanup", "press", "right");
+	await wait(20);
+	assert.equal((await readConfig()).faiku.tabsClosed.length, 1);
+	await pi.commands.get("faiku").handler("tab reopen", ctx);
+	assert.deepEqual((await readConfig()).faiku.tabsClosed, []);
+});
+
+test("closing the chat you are in is refused", async () => {
+	const { component, row } = await startWithTabs();
+	clickOn(component, row(), "the chat you are in", "press", "middle");
+	await wait(20);
+	assert.equal((await readConfig()).faiku?.tabsClosed, undefined);
+});
+
+test("`/faiku tab <n>` switches, and lists when there is nothing to switch to", async () => {
+	const { pi, ctx } = await startWithTabs();
+	const command = pi.commands.get("faiku");
+	await command.handler("tab", ctx);
+	assert.match(ctx.ui.notifications.at(-1).message, /api cleanup/);
+	await command.handler("tab 2", ctx);
+	assert.equal(ctx.switchedTo?.endsWith("-older.jsonl"), true);
+	await command.handler("tab 99", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("Usage:"));
+});
+
+test("a switch is refused while the agent is working", async () => {
+	const { pi, ctx } = await startWithTabs();
+	ctx.isIdle = () => false;
+	await pi.commands.get("faiku").handler("tab 2", ctx);
+	assert.equal(ctx.switchedTo, undefined);
+	await pi.commands.get("faiku").handler("tab new", ctx);
+	assert.equal(ctx.newedSession, undefined);
+});
+
+test("`/faiku tab new` starts a chat", async () => {
+	const { pi, ctx } = await startWithTabs();
+	await pi.commands.get("faiku").handler("tab new", ctx);
+	assert.equal(ctx.newedSession, true);
+});
+
+test("the alt shortcuts drive the same commands", async () => {
+	const { pi } = await startWithTabs();
+	assert.ok(pi.shortcuts.has("alt+1"));
+	assert.ok(pi.shortcuts.has("alt+0"));
+	assert.ok(pi.shortcuts.has("alt+shift+left"));
+	pi.shortcuts.get("alt+2").handler();
+	assert.deepEqual(pi.sent, ["/faiku tab 2"]);
+	pi.shortcuts.get("alt+0").handler();
+	assert.deepEqual(pi.sent, ["/faiku tab 2", "/faiku tab new"]);
+});
+
+test("nothing is dispatched while the bar is switched off", async () => {
+	const { pi, ctx } = await startWithTabs();
+	await pi.commands.get("faiku").handler("tabs off", ctx);
+	pi.shortcuts.get("alt+1").handler();
+	assert.deepEqual(pi.sent, []);
+});
+
+test("`/faiku tab close` with no chat says which one it meant", async () => {
+	const { pi, ctx } = await startWithTabs();
+	await pi.commands.get("faiku").handler("tab close", ctx);
+	assert.equal((await readConfig()).faiku?.tabsClosed, undefined);
+	await pi.commands.get("faiku").handler("tab 1", ctx);
+	assert.equal(ctx.switchedTo, undefined, "chat 1 is this one");
+});
+
+test("pi's regular mode has no mouse, so the bar says why instead of sitting there", async () => {
+	tuiMode = "regular";
+	try {
+		const { pi, ctx } = await start();
+		// No bar: a tab that ignores every click is indistinguishable from a
+		// broken one, and this mode cannot do better.
+		assert.equal(ctx.ui.overlays.some((overlay) => overlay.options.overlayOptions().anchor === "top-left"), false);
+		await pi.commands.get("faiku").handler("info", ctx);
+		assert.ok(ctx.ui.notifications.at(-1).message.includes("regular — the tab bar and every mouse click need fullscreen"));
+		// And nothing is claimed about a mode this package never reached.
+		assert.ok(ctx.ui.statuses.every((row) => !row.text.includes("restart pi")));
+	} finally {
+		tuiMode = "fullscreen";
+	}
+});
+
+test("regular mode puts fullscreen in the settings for the next start, and says so", async () => {
+	tuiMode = "regular";
+	try {
+		const { ctx } = await start();
+		await wait(30);
+		assert.equal((await readConfig()).tuiMode, "fullscreen");
+		// A toast, like every other thing this package says: it expires by
+		// itself and it looks like the rest of the interface.
+		const toasts = await overlayRows(ctx, "top-right", 40);
+		assert.ok(toasts.some((row) => row.includes("Set pi to fullscreen")));
+		// And a footer line for the part that has to outlive the toast.
+		assert.ok(ctx.ui.statuses.some((row) => row.text.includes("restart pi for the tab bar")));
+		// The toasts themselves are left alone: nothing was asked to be closed.
+		assert.equal(ctx.ui.overlays.some((overlay) => overlay.options.overlayOptions().anchor === "top-right"), true);
+	} finally {
+		tuiMode = "fullscreen";
+	}
+});
+
+test("a fullscreen session leaves no note about the mode in the footer", async () => {
+	const { ctx } = await start();
+	await wait(30);
+	assert.deepEqual(ctx.ui.statuses, []);
+});
+
+test("`faiku.fullscreen: false` warns without writing, and says where to look", async () => {
+	tuiMode = "regular";
+	try {
+		const { ctx } = await start({ faiku: { fullscreen: false } });
+		await wait(30);
+		assert.equal((await readConfig()).tuiMode, undefined);
+		const toasts = await overlayRows(ctx, "top-right", 40);
+		assert.ok(toasts.some((row) => row.includes("Tab bar needs fullscreen mode")));
+		assert.ok(ctx.ui.statuses.some((row) => row.text.includes("/faiku fullscreen on")));
+	} finally {
+		tuiMode = "fullscreen";
+	}
+});
+
+test("`faiku.fullscreen: false` keeps pi's mode alone", async () => {
+	tuiMode = "regular";
+	try {
+		const { ctx } = await start({ faiku: { fullscreen: false } });
+		await wait(30);
+		assert.equal((await readConfig()).tuiMode, undefined);
+	} finally {
+		tuiMode = "fullscreen";
+	}
+});
+
+test("`/faiku fullscreen off` says no for good, and on undoes it", async () => {
+	tuiMode = "regular";
+	try {
+		const { pi, ctx } = await start();
+		const command = pi.commands.get("faiku");
+		await command.handler("fullscreen off", ctx);
+		const off = await readConfig();
+		assert.equal(off.tuiMode, "regular");
+		assert.equal(off.faiku.fullscreen, false);
+		await command.handler("fullscreen sideway", ctx);
+		assert.ok(ctx.ui.notifications.at(-1).message.includes("Usage:"));
+		await command.handler("fullscreen", ctx);
+		const on = await readConfig();
+		assert.equal(on.tuiMode, "fullscreen");
+		assert.equal(on.faiku.fullscreen, true);
+		// The toast overlay is closed, so pi's own switch is not refused for it.
+		const toasts = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-right");
+		assert.equal(toasts.closed, true);
+		assert.ok(ctx.ui.notifications.at(-1).message.includes("/faiku toasts on"));
+	} finally {
+		tuiMode = "fullscreen";
+	}
+});
+
+test("`/faiku fullscreen` in fullscreen mode says so instead of closing the toasts", async () => {
+	const { pi, ctx } = await start();
+	await pi.commands.get("faiku").handler("fullscreen", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("Already in fullscreen mode"));
+	const toasts = ctx.ui.overlays.find((overlay) => overlay.options.overlayOptions().anchor === "top-right");
+	assert.equal(toasts.closed, false);
+});
+
+test("a fresh session does not switch the mode back on after `fullscreen off`", async () => {
+	tuiMode = "regular";
+	try {
+		const first = await start();
+		await first.pi.commands.get("faiku").handler("fullscreen off", first.ctx);
+		// The next session reads that decision out of the settings file.
+		const second = await start(undefined, { keepSettings: true });
+		await wait(30);
+		assert.equal((await readConfig()).tuiMode, "regular");
+		assert.equal(second.ctx.ui.overlays.some((overlay) => overlay.options.overlayOptions().anchor === "top-left"), false);
+	} finally {
+		tuiMode = "fullscreen";
+	}
+});
+
+test("`/faiku keys` names what the terminal sent and what it would run", async () => {
+	const { pi, ctx } = await startWithTabs();
+	const seen = [];
+	ctx.ui.onTerminalInput = (handler) => {
+		seen.push(handler);
+		return () => seen.pop();
+	};
+	const command = pi.commands.get("faiku");
+	const pending = command.handler("keys", ctx);
+	// The listener is registered before the command waits, so this is a keypress
+	// arriving during the probe. A mouse report is not a key and is not listed.
+	seen[0]("\x1b1");
+	seen[0]("\x1b[<0;10;1M");
+	await pending;
+	const report = ctx.ui.notifications.at(-1).message;
+	assert.match(report, /→  alt\+1  →  chat 1/);
+	assert.match(report, /u001b1/, "the bytes it received are reported too");
+	assert.ok(!report.includes("x1b[<"), "mouse reports are not keys");
+});
+
+test("a slot can be rebound, listed, and put back", async () => {
+	const { pi, ctx } = await startWithTabs();
+	const command = pi.commands.get("faiku");
+	await command.handler("keys list", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("1  alt+1  chat 1"));
+
+	await command.handler("keys set 1 ctrl+alt+1", ctx);
+	assert.equal((await readConfig()).faiku.tabKeys["1"], "ctrl+alt+1");
+	await command.handler("keys set new nonsense+", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("Usage:"));
+	await command.handler("keys set sideways ctrl+alt+1", ctx);
+	assert.ok(ctx.ui.notifications.at(-1).message.includes("Usage:"));
+	assert.equal((await readConfig()).faiku.tabKeys.sideways, undefined);
+
+	// A fresh session registers the key the user chose, and not the one they
+	// gave up: a binding is read when pi starts, like every other setting.
+	const next = await startWithTabs({}, await readConfig());
+	assert.ok(next.pi.shortcuts.has("ctrl+alt+1"));
+	assert.equal(next.pi.shortcuts.has("alt+1"), false);
+	await next.pi.commands.get("faiku").handler("keys reset", ctx);
+	assert.deepEqual((await readConfig()).faiku.tabKeys, {});
+});
+
+test("a slot set to none is left unbound", async () => {
+	const { pi } = await startWithTabs({}, { faiku: { tabKeys: { "1": "", prev: "" } } });
+	assert.equal(pi.shortcuts.has("alt+1"), false);
+	assert.equal(pi.shortcuts.has("alt+shift+left"), false);
+	// The slots that were not touched are still there.
+	assert.ok(pi.shortcuts.has("alt+2"));
+	assert.ok(pi.shortcuts.has("alt+shift+right"));
 });
