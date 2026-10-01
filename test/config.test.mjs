@@ -79,9 +79,11 @@ test("describeConfig reports every switch as on or off", () => {
 	assert.ok(described.includes("toasts     off"));
 	assert.ok(described.includes("box        on"));
 	assert.ok(described.includes("history    on, 6 rows"));
+	assert.ok(described.includes("tabs       on, 8 chats, 0 closed"));
+	assert.ok(described.includes("fullscreen on may switch pi's TUI mode"));
 	assert.ok(described.includes("collapse   all"));
 	assert.ok(described.includes("padding    compact"));
-	assert.equal(described.split("\n").length, 12);
+	assert.equal(described.split("\n").length, 14);
 });
 
 test("the collapse mode is read, and only the four modes are", () => {
